@@ -355,8 +355,8 @@
 
 <!-- 两个普通 script，照旧不是 module —— file:// 直接开也得能用。
      ⚠ 路径带 ../：这一页在 phone/ 子目录里；chars.js 里的 file 是相对**站点根目录**的。 -->
-<script src="./cutout.js"></script>
-<script src="./chars/chars.js"></script>
+<script src="../cutout.js"></script>
+<script src="../chars/chars.js"></script>
 
 <script>
 'use strict';
@@ -1260,7 +1260,7 @@ $('sheetToggle').onclick = () => {
 /**
  * 素材清单来自 chars/chars.js（普通 script，window.ARCAM_CHARS）。
  * ⚠ file 是**相对站点根目录**的（chars/立绘/xx.jpg），而这一页在 phone/ 子目录里 ——
- *   拼 URL 必须补 './'，少这一下全是 404。
+ *   拼 URL 必须补 '../'，少这一下全是 404。
  */
 const LIB = window.ARCAM_CHARS || { characters: [], backgrounds: [] };
 const CUT = window.ARCAM_CUT || null;   // cutout.js 没加载上也不至于整页炸
@@ -1446,11 +1446,11 @@ function renderChRow(){
     b.dataset.idx = i;
     const im = document.createElement('img');
     im.alt = it.name;
-    im.src = './' + it.file;          // ← 相对站点根目录，必须补 ../
+    im.src = '../' + it.file;          // ← 相对站点根目录，必须补 ../
     const sp = document.createElement('span');
     sp.textContent = it.name;
     b.appendChild(im); b.appendChild(sp);
-    b.onclick = () => loadChar('./' + it.file, it.name, i);
+    b.onclick = () => loadChar('../' + it.file, it.name, i);
     b.classList.toggle('on', i === chSel);
     row.appendChild(b);
   });
