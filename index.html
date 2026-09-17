@@ -602,10 +602,28 @@ const TXT = {
   'gate.msg':     ['需要授权摄像头和动作传感器', 'Camera and motion sensor access required'],
   'gate.start':   ['开始', 'Start'],
   'gate.opening': ['正在打开摄像头和传感器…', 'Opening camera and sensors…'],
-  'gate.fail':    ['<span class="err">失败：{0} — {1}</span><br><br>必须通过 http://localhost 打开（adb reverse），'
-                 + '用 http://局域网IP 会因为不是安全上下文而被浏览器禁掉摄像头和传感器。',
-                   '<span class="err">Failed: {0} — {1}</span><br><br>Open it over http://localhost (adb reverse). '
-                 + 'Over http://<LAN IP> it is not a secure context, so the browser blocks the camera and motion sensors.'],
+  // ⚠ 失败提示必须**分情况**。原来只有一条，写死了"必须通过 http://localhost 打开（adb reverse）"——
+  //   那是本机安卓调试的口诀，却会打给任何一个失败的人看：朋友的 iPhone 在美国走 HTTPS 报权限被拒，
+  //   屏幕上出现的却是"去装 adb" —— 把人往完全错误的方向带。
+  //   三种分开：不是安全上下文 / 权限被拒 / 其它。
+  'gate.failInsecure': ['<span class="err">不是安全上下文</span><br><br>'
+                 + '摄像头和动作传感器只在 <b>https://</b> 或 <b>http://localhost</b> 下可用。'
+                 + '你现在这个地址是 http://，浏览器直接不给。',
+                   '<span class="err">Not a secure context</span><br><br>'
+                 + 'The camera and motion sensors only work over <b>https://</b> or <b>http://localhost</b>. '
+                 + 'The current address is http://, so the browser refuses.'],
+  'gate.failDenied': ['<span class="err">权限被拒</span><br><br>'
+                 + '① 别在聊天软件里点开（微信/QQ/Discord 的内置浏览器不给摄像头）—— 复制链接到 '
+                 + '<b>Safari</b> 或 <b>Chrome</b> 打开。<br>'
+                 + '② iPhone：设置 → Safari → 摄像头，改成"允许"。<br>'
+                 + '③ 地址栏左边那个锁/相机图标点开，把摄像头权限改成允许，然后刷新重来。',
+                   '<span class="err">Permission denied</span><br><br>'
+                 + '① Do not open it inside a chat app (WeChat / Discord in-app browsers block the camera) — '
+                 + 'copy the link into <b>Safari</b> or <b>Chrome</b>.<br>'
+                 + '② iPhone: Settings → Safari → Camera → Allow.<br>'
+                 + '③ Tap the lock/camera icon in the address bar, allow the camera, then reload.'],
+  'gate.fail':    ['<span class="err">失败：{0} — {1}</span>',
+                   '<span class="err">Failed: {0} — {1}</span>'],
 
   // 保存
   'note.longPress': ['没弹出保存框就长按这张图 →「存储到照片」',
@@ -2157,6 +2175,14 @@ function zoomFail(el, note){
 async function start() {
   $('gateMsg').textContent = t('gate.opening');
   try {
+    // ⚠ 运动权限必须**第一个**要，而且要在用户手势里同步调。
+    //   iOS 把 DeviceOrientationEvent.requestPermission() 归到"用户手势"里管，
+    //   中间只要夹一次 await（下面 getUserMedia 就是），手势上下文就没了，再调直接被拒。
+    //   原来这段写在 getUserMedia 后面 → iPhone 上必然拿不到陀螺仪。
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      await DeviceOrientationEvent.requestPermission();
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
       audio: false,
@@ -2167,11 +2193,6 @@ async function start() {
     // 摄像头已经跑起来了，再挂变焦 —— 拿不到 caps.zoom 的话这一格就保持隐藏
     setupZoom(stream.getVideoTracks()[0]);
 
-    // 请求传感器权限（iOS 需要，Android 直接给）
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      await DeviceOrientationEvent.requestPermission();
-    }
     window.addEventListener('deviceorientation', onOrient, true);
 
     // 让 canvas 精确覆盖在 video 上，且内部坐标系 = 视频像素坐标
@@ -2200,7 +2221,11 @@ async function start() {
 
     $('gate').style.display = 'none';
   } catch (err) {
-    $('gateMsg').innerHTML = t('gate.fail', err.name, err.message);
+    // 三种失败分开报（见 gate.fail* 那几条注释）
+    $('gateMsg').innerHTML =
+        !window.isSecureContext          ? t('gate.failInsecure')
+      : err && err.name === 'NotAllowedError' ? t('gate.failDenied')
+      :                                  t('gate.fail', err.name || '?', err.message || '');
   }
 }
 $('gateBtn').addEventListener('click', start);
