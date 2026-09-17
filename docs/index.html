@@ -548,8 +548,13 @@ const TXT = {
   'note.chFail':  ['这张图读不出来', 'Could not read that image'],
   'note.chNone':  ['先在上面选一张立绘', 'Pick a character above first'],
   'note.cutSolid':['抠掉 {0}% 的底色', 'Removed {0}% background'],
-  'note.notSolid':['四角颜色不一致，或本来就是透明底 —— 没动它（这种要用 AI 抠图）',
-                   'Corners differ, or it is already transparent — left untouched (use AI cut for this)'],
+  // ⚠ 别再叫人「去用 AI 抠图」：AI 抠图是 PC 融图台那条路，这一版根本不发它
+  //   （vision/ 那 18MB 整个不进包）。提示指向一个页面上不存在的功能，等于把人晾在那儿 ——
+  //   和之前那句「去装 adb」是同一类错：文案还停留在旧版的功能集上。
+  'note.notSolid':['四角颜色不一致，或本来就是透明底 —— 没动它。'
+                 + '这张的底色不是纯色，得先用别的工具抠干净再传。',
+                   'Corners differ, or it is already transparent — left untouched. '
+                 + 'The background is not a solid colour; clean it up with another tool first.'],
   'note.trimmed': ['裁边：{0}×{1} → {2}×{3}', 'Trimmed: {0}×{1} → {2}×{3}'],
   'note.noMargin':['四周没有多余的透明边距', 'No transparent margin to trim'],
   'note.allTrans':['整张图都是透明的，没东西可裁', 'The whole image is transparent — nothing to trim'],
