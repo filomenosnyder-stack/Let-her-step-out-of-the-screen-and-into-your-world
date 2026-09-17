@@ -267,6 +267,7 @@
     <div class="btns">
       <button id="tGrid" class="on" data-t="btn.grid">地面网格</button>
       <button id="tBody" class="on" data-t="btn.body">人体</button>
+      <button id="tLight" class="on" data-t="btn.light">光线匹配</button>
     </div>
     <div class="btns">
       <button id="exPack" data-t="btn.export">导出素材包</button>
@@ -459,6 +460,7 @@ const TXT = {
   'cam.feq':      ['等效焦距', '35mm equiv.'],
   'cam.frame':    ['取景框', 'Framing'],
   'btn.grid':     ['地面网格', 'Ground grid'],
+  'btn.light':    ['光线匹配', 'Light match'],
   'btn.body':     ['人体', 'Figure'],
   'btn.shot':     ['拍照', 'Shoot'],
   // 快门只出照片；三个文件的包挪到这个按钮里，点了才打 zip
@@ -838,12 +840,158 @@ function onOrient(e) {
 }
 
 // ── 绘制 ──────────────────────────────────────────────────────────
+// ── 光线匹配 ──────────────────────────────────────────────────────
+/**
+ * 把立绘的颜色/明暗往当前环境靠，让它"站在那儿"而不是"贴上去"。
+ *
+ * 不引模型 —— 能干的都干不了：
+ *   · WebXR Lighting Estimation 要 immersive-ar 会话，**iOS Safari 不支持**；
+ *   · ARCore Environmental HDR 是 Android 独占；
+ *   · 学术界那套（估 albedo/shading/normal 再重打光）要跑三个网络，手机浏览器扛不住，
+ *     而且这一版刚为省体积把 18MB 的 AI 引擎整个剔出包，不能为它再加回去。
+ * 只取**统计量**：环境平均亮度、色温、反差。这三个从一帧里采出来是稳的，也正好是"看着假"的主因。
+ *
+ * ⚠ 只做颜色/明暗，**不做阴影**。阴影要有方向，而方向估不准：相机自动曝光一直在动
+ *   （采到的均值几乎恒定）、亮的不等于光源（一面白墙就会让那侧更亮）、立绘站的位置
+ *   和环境平均是两码事、画幅坐标还得拿陀螺仪掰成世界坐标。估错比不做更假。
+ *   室内更没有单一方向的光 —— 顶灯、窗户、墙反光混在一起，硬做方向阴影必错。
+ *
+ * 柔顺靠三条，不是靠模型：
+ *   ① 时间平滑（指数滑动平均）—— 逐帧跟着环境走会一直闪，"不柔顺"的头号原因就是它
+ *   ② 强度封顶 65% —— 靠满 100% 立绘会变灰蒙蒙一块，失掉自己的颜色
+ *   ③ 空间渐变 —— 上亮下暗（"光从上来"是最保险的假设），比整体提亮自然得多
+ */
+const LIGHT = { ok:false, lum:0.5, r:0.5, b:0.5, sat:0.3 };
+let LIGHT_ON = true, lightTick = 0, lcv = null, lctx = null;
+let chLum = 0, chSat = 0, litCv = null, litCtx = null, litSig = '';
+
+const clampN = (x, a, b) => Math.min(b, Math.max(a, x));
+
+/** 每 6 帧采一次：把当前帧缩到 32×32，算三通道均值 */
+function sampleLight(){
+  if (!LIGHT_ON || !v.videoWidth || (lightTick++ % 6)) return;
+  const N = 32;
+  if (!lcv){
+    lcv = document.createElement('canvas'); lcv.width = lcv.height = N;
+    lctx = lcv.getContext('2d', { willReadFrequently: true });
+  }
+  lctx.drawImage(v, 0, 0, N, N);
+  const d = lctx.getImageData(0, 0, N, N).data;
+  let R = 0, G = 0, B = 0;
+  for (let i = 0; i < d.length; i += 4){ R += d[i]; G += d[i+1]; B += d[i+2]; }
+  const n = d.length / 4; R /= n; G /= n; B /= n;
+  const lum = (0.2126*R + 0.7152*G + 0.0722*B) / 255;
+  const k = 0.12;                       // ① 新值只占 12%，画面不会跟着环境一跳一跳
+  LIGHT.lum += (lum   - LIGHT.lum) * k;
+  LIGHT.r   += (R/255 - LIGHT.r)  * k;
+  LIGHT.b   += (B/255 - LIGHT.b)  * k;
+  // 环境饱和度：阴天/室内偏灰、晴天艳。立绘不跟着降饱和，就会一眼看出是贴上去的
+  const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
+  LIGHT.sat += ((mx ? (mx - mn) / mx : 0) - LIGHT.sat) * k;
+  LIGHT.ok = true;
+}
+
+/** 立绘自己的平均亮度。⚠ 透明像素必须跳过 —— 不算的话一张大半透明的立绘会被当成很暗 */
+function charLum(){
+  if (!chCanvas || !chCanvas.width) return 0;
+  const w = 32, h = Math.max(1, Math.round(chCanvas.height / chCanvas.width * 32));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g2 = c.getContext('2d', { willReadFrequently: true });
+  g2.drawImage(chCanvas, 0, 0, w, h);
+  const d = g2.getImageData(0, 0, w, h).data;
+  let L = 0, Sa = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4){
+    if (d[i+3] < 8) continue;
+    L += (0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2]) / 255;
+    const mx = Math.max(d[i], d[i+1], d[i+2]), mn = Math.min(d[i], d[i+1], d[i+2]);
+    Sa += mx ? (mx - mn) / mx : 0;
+    n++;
+  }
+  if (!n) return 0.5;
+  chSat = Sa / n;
+  return L / n;
+}
+
+/** ctx.filter 那一串：亮度 / 反差。色温另外叠，见 lightTint */
+function lightFilter(){
+  if (!LIGHT_ON || !LIGHT.ok || !chLum) return 'none';
+  // ② 强度 80%：目标是「融入环境」，靠得太轻等于没做；留 20% 是别把立绘自己的颜色洗掉
+  const want = chLum + (LIGHT.lum - chLum) * 0.80;
+  const bright   = clampN(want / chLum, 0.5, 1.8);
+  const contrast = clampN(0.92 + LIGHT.lum * 0.2, 0.85, 1.12);
+  // 饱和度也往环境靠 —— 阴天/室内的画面偏灰，立绘还是艳的，一眼就是贴上去的
+  const sat = clampN(1 + (LIGHT.sat - chSat) * 0.9, 0.6, 1.4);
+  return `brightness(${bright.toFixed(3)}) contrast(${contrast.toFixed(3)}) saturate(${sat.toFixed(3)})`;
+}
+
+/** 色温 + ③ 空间渐变 */
+function lightTint(){
+  const rb = LIGHT.r - LIGHT.b;      // >0 偏暖（钨丝灯/黄昏），<0 偏冷（日光/阴天）
+  const a = Math.min(0.20, Math.abs(rb) * 0.5);
+  if (a < 0.02 || !litCtx || !litCv || !litCv.height) return null;
+  const col = rb > 0 ? '255,186,112' : '148,188,255';
+  const gr = litCtx.createLinearGradient(0, 0, 0, litCv.height);
+  gr.addColorStop(0, `rgba(${col},${a.toFixed(3)})`);
+  gr.addColorStop(1, `rgba(${col},${(a * 0.35).toFixed(3)})`);
+  return gr;
+}
+
+/** 烘一版"已经匹配过光线"的立绘。光线值没实质变化就不重烘 */
+function bakeLit(){
+  if (!chCanvas || !chCanvas.width) return;
+  if (litFor !== chCanvas){ litFor = chCanvas; chLum = 0; litSig = ''; litCv = null; }
+  if (!chLum) chLum = charLum();
+  const sig = (LIGHT_ON && LIGHT.ok)
+    ? LIGHT.lum.toFixed(1) + '|' + (LIGHT.r - LIGHT.b).toFixed(1) : 'off';
+  if (sig === litSig && litCv && litCv.width === chCanvas.width) return;
+  litSig = sig;
+  if (!litCv){ litCv = document.createElement('canvas'); litCtx = litCv.getContext('2d'); }
+  if (litCv.width !== chCanvas.width || litCv.height !== chCanvas.height){
+    litCv.width = chCanvas.width; litCv.height = chCanvas.height;
+  }
+  litCtx.setTransform(1, 0, 0, 1, 0, 0);
+  litCtx.clearRect(0, 0, litCv.width, litCv.height);
+  litCtx.filter = lightFilter();
+  litCtx.drawImage(chCanvas, 0, 0);
+  litCtx.filter = 'none';
+  // 暗环境抬黑位：只压亮度的话立绘会变成剪纸。往上加一个常量，黑的地方也抬起来
+  const lift = clampN((0.42 - LIGHT.lum) * 0.4, 0, 0.16);
+  if (lift > 0.01){
+    litCtx.globalCompositeOperation = 'source-atop';
+    litCtx.fillStyle = `rgba(255,255,255,${lift.toFixed(3)})`;
+    litCtx.fillRect(0, 0, litCv.width, litCv.height);
+    litCtx.globalCompositeOperation = 'source-over';
+  }
+  const tint = lightTint();
+  if (tint){
+    litCtx.globalCompositeOperation = 'source-atop';   // 只染立绘本身，不染透明区
+    litCtx.fillStyle = tint;
+    litCtx.fillRect(0, 0, litCv.width, litCv.height);
+    litCtx.globalCompositeOperation = 'source-over';
+  }
+}
+let litFor = null;
+
+/** 预览和出图都用这一张 —— 两边同源，照片和立绘层才对得上 */
+function litChar(){
+  if (!LIGHT_ON || !LIGHT.ok) return chCanvas;
+  bakeLit();
+  return (litCv && litCv.width) ? litCv : chCanvas;
+}
+
+$('tLight').addEventListener('click', e => {
+  LIGHT_ON = !LIGHT_ON; litSig = ''; litFor = null;      // 换开关要重烘
+  e.target.classList.toggle('on', LIGHT_ON);
+  draw();
+});
+
 function draw() {
   if (!S.ready) return;
   const W = cv.width, H = cv.height;
   ctx.clearRect(0, 0, W, H);
   if (S.grid) drawGrid();
   drawHorizon();
+  sampleLight();              // 光线匹配：采当前帧（内部自己按帧数节流）
   drawCharTo(ctx);            // 立绘站在场景里 —— 和骨架、网格同一套投影
   if (S.body) drawFigure();   // 骨架盖在立绘上，对位的时候要看得到
   drawFrame();
@@ -1691,7 +1839,8 @@ function drawCharTo(g){
   g.save();
   g.translate(c.u, c.v);
   g.rotate(c.rot);
-  g.drawImage(chCanvas, -c.w/2, -c.h/2, c.w, c.h);
+  // 用烘好的"匹配过光线"的那版；没开光线匹配时 litChar() 直接返回原图
+  g.drawImage(litChar(), -c.w/2, -c.h/2, c.w, c.h);
   g.restore();
 }
 
