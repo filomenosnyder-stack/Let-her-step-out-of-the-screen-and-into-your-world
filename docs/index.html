@@ -182,6 +182,10 @@
   #gate button { margin-top:18px; width:100%; padding:14px; background:#2b5f7d; color:#fff;
                  border:1px solid #3f9fd0; border-radius:9px; font-size:15px; }
   #gate .err { color:#ff8a8a; }
+  /* 门上的公告。左对齐、比正文小一号 —— 它是"顺便看一眼"，不能抢「开始」那个按钮。 */
+  #gateNote { margin-bottom:22px; padding:12px 14px; border-radius:9px; text-align:left;
+              background:#141b21; border:1px solid #2a3944; font-size:12.5px; line-height:1.75; color:#9aa7b2; }
+  #gateNote b { display:block; margin-bottom:5px; color:#5fd0ff; font-size:13.5px; }
 
   /* 中 / EN 开关。放右上角，和左边那块 HUD 对称 */
   #lang { position:fixed; right:10px; top:calc(10px + env(safe-area-inset-top)); z-index:60;
@@ -268,6 +272,7 @@
       <button id="tGrid" class="on" data-t="btn.grid">地面网格</button>
       <button id="tBody" class="on" data-t="btn.body">人体</button>
       <button id="tLight" class="on" data-t="btn.light">光线匹配</button>
+      <button id="tGrain" class="on" data-t="btn.grain">颗粒匹配</button>
     </div>
     <div class="btns">
       <button id="exPack" data-t="btn.export">导出素材包</button>
@@ -350,6 +355,13 @@
 <div id="tip" hidden></div>
 
 <div id="gate"><div>
+  <!-- 公告：加了新功能就在这儿说一声。
+       ⚠ 必须是**独立节点** —— gateMsg 会被 gate.fail 覆写成报错文案，
+       公告要是塞进同一个节点，一报错就跟着没了。 -->
+  <div id="gateNote">
+    <b data-t="gate.noteT">新功能测试中</b>
+    <span data-t="gate.noteB">刚加了「颗粒匹配」：让立绘的质感和手机拍出来的画面对齐。默认开着，「取景」那一排可以点开关对比。还在调，有问题欢迎反馈。</span>
+  </div>
   <div id="gateMsg" data-t="gate.msg">需要授权摄像头和动作传感器</div>
   <button id="gateBtn" data-t="gate.start">开始</button>
 </div></div>
@@ -461,6 +473,7 @@ const TXT = {
   'cam.frame':    ['取景框', 'Framing'],
   'btn.grid':     ['地面网格', 'Ground grid'],
   'btn.light':    ['光线匹配', 'Light match'],
+  'btn.grain':    ['颗粒匹配', 'Grain match'],
   'btn.body':     ['人体', 'Figure'],
   'btn.shot':     ['拍照', 'Shoot'],
   // 快门只出照片；三个文件的包挪到这个按钮里，点了才打 zip
@@ -606,6 +619,9 @@ const TXT = {
   'horizon':      ['地平线', 'Horizon'],
 
   // 闸门 / 报错
+  'gate.noteT':   ['新功能测试中', 'New feature in testing'],
+  'gate.noteB':   ['刚加了「颗粒匹配」：让立绘的质感和手机拍出来的画面对齐。默认开着，「取景」那一排可以点开关对比。还在调，有问题欢迎反馈。',
+                   'Just added "Grain match": it aligns the cutout\'s texture with your phone photo. On by default — toggle it in the Framing row to compare. Still tuning; feedback welcome.'],
   'gate.msg':     ['需要授权摄像头和动作传感器', 'Camera and motion sensor access required'],
   'gate.start':   ['开始', 'Start'],
   'gate.opening': ['正在打开摄像头和传感器…', 'Opening camera and sensors…'],
@@ -863,9 +879,53 @@ function onOrient(e) {
  */
 const LIGHT = { ok:false, lum:0.5, r:0.5, b:0.5, sat:0.3 };
 let LIGHT_ON = true, lightTick = 0, lcv = null, lctx = null;
-let chLum = 0, chSat = 0, litCv = null, litCtx = null, litSig = '';
+// 三个分量**各自一个开关**。合在一个开关里的话，出了"太暗/太黄"分不清是谁干的 ——
+// 测试时单独切每一项，才能判断哪种处理让人物不自然。默认全开。
+let LIGHT_BRI = true;   // 明暗匹配
+let LIGHT_TMP = true;   // 色温（白平衡）
+let LIGHT_SAT = true;   // 环境色/饱和度
+// ★ 质感匹配（2026-09-18 加）：光色对上了还是"贴上去的"，差的是**照片的脏**。
+//   手机在暗处会飙 ISO，噪点就上来了；立绘是像素级干净的（AI 出图 / 矢量级描边），
+//   两张贴一起，一眼假。这一层只补**颗粒**，而且只补在立绘上 —— 照片是人家拍的，一个像素都不动。
+let LIGHT_GRN = true;   // 颗粒（噪点）
+// 边缘柔化：立绘的边是刀口级的，照片里没有这种边。默认**关** ——
+// 它可能把立绘自带的边缘底色（抠图残留）拖出来，先出 A/B 让人看，别擅自上。
+let LIGHT_SFT = false;
+// 颗粒幅度：暗环境大、亮环境几乎没有 —— 这正是手机相机的行为（ISO 跟环境亮度反着走）。
+// 上限 6.5 是 255 里的 6.5，约 2.5% —— 再大就不是"照片的脏"，是雪花屏了。
+const GRN_MAX = 6.5, GRN_MIN = 0.7;
+const GRN_COMP_MAX = 3.2;   // 缩放补偿上限（见 bakeLit 里的说明）
+const SFT_PX = 0.6;     // 柔化像素数（原生分辨率下）
+// 响应速度：环境变了之后人物多久跟上（新值占比，越大越快、也越容易闪）
+const LIGHT_K = 0.12;
+// 匹配幅度：相对"中性环境"允许人物被调亮/调暗到多少倍。两头都夹住 ——
+// 深色衣服在亮房间里本来就该比白墙暗，**不能拿"人物平均亮度 = 环境亮度"当目标**
+// 上限 1.5→1.25→1.15：网格实测，增益拉到 1.25 那格（亮海滩）里白平衡会**失效** ——
+//   亮部被 255 削平，R 撞顶而 B 没撞，R/B 比就被压回 1，色温那一路白做。
+//   人眼对"亮一点"本来就不敏感，压暗干脆、提亮保守。
+const LIGHT_GAIN_MAX = 1.15, LIGHT_GAIN_MIN = 0.6, LIGHT_NEUTRAL = 0.42;
+let chLum = 0, chSat = 0, chR = 0, chB = 0, litCv = null, litCtx = null, litSig = '';
 
 const clampN = (x, a, b) => Math.min(b, Math.max(a, x));
+
+/**
+ * 颗粒用的噪声砖：256×256 一张，**只建一次**。
+ * 为什么不逐像素现算随机数：
+ *   ① 烘焙是 200 万像素的循环，每像素多加一次 hash ≈ 多跑一半；
+ *   ② 更致命的是**不稳定** —— 每次重烘的颗粒都不是同一张，光一变颗粒就"沙沙"重排，
+ *      看着像电视雪花，比不加还假。固定种子的一张砖查表取，两次位运算。
+ */
+let grnTile = null;
+function grainTile(){
+  if (grnTile) return grnTile;
+  grnTile = new Float32Array(256 * 256);
+  let s = 0x9E3779B9 | 0;                       // 固定种子 —— 每次打开、每次重烘都一样
+  for (let i = 0; i < grnTile.length; i++){
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5;   // xorshift32
+    grnTile[i] = s / 2147483648;                // → -1 ~ 1
+  }
+  return grnTile;
+}
 
 /** 每 6 帧采一次：把当前帧缩到 32×32，算三通道均值 */
 function sampleLight(){
@@ -875,20 +935,76 @@ function sampleLight(){
     lcv = document.createElement('canvas'); lcv.width = lcv.height = N;
     lctx = lcv.getContext('2d', { willReadFrequently: true });
   }
-  lctx.drawImage(v, 0, 0, N, N);
-  const d = lctx.getImageData(0, 0, N, N).data;
+  // ★ 采**立绘所在的那一带**，不是整帧平均。
+  //   整帧会把白墙、天空这些"根本没照在人物身上"的东西混进均值里。
+  //   视频里没有立绘本身（它是后叠上去的），所以这一块采到的就是**人物背后的实景** ——
+  //   不需要任何分割模型就能避开人物自己。
+  const VWv = v.videoWidth, VHv = v.videoHeight;
+  const rr = clampRegion(lightRegion(), VWv, VHv);   // 取框口径跟出图共用一份
+  const m = measureRegion(v, VWv, VHv, rr.sx, rr.sy, rr.sw, rr.sh, N);
+  if (!m) return;
+  const lum = m.lum, R = m.r * 255, B = m.b * 255;
+  const k = LIGHT_K;                    // ① 响应速度，新值占比
+  LIGHT.lum += (lum   - LIGHT.lum) * k;
+  LIGHT.r   += (m.r   - LIGHT.r)  * k;
+  LIGHT.b   += (m.b   - LIGHT.b)  * k;
+  LIGHT.sat += (m.sat - LIGHT.sat) * k;
+  LIGHT.ok = true;
+}
+
+/**
+ * 采样口径 + 均值计算（**预览和出图共用同一份**，否则两边的光对不上）。
+ *   源可以是 <video> 也可以是画布 —— 出图时要拿"正要导出的那一帧"来量，不是拿摄像头流。
+ * 返回 { lum, r, b, sat }（都归一化到 0~1），取不到返回 null。
+ */
+function measureRegion(源, 源宽, 源高, sx, sy, sw, sh, N){
+  if (!源宽 || !源高 || !(sw > 0) || !(sh > 0)) return null;
+  const c = document.createElement('canvas'); c.width = c.height = N;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  try { g.drawImage(源, sx, sy, sw, sh, 0, 0, N, N); } catch (e) { return null; }
+  const d = g.getImageData(0, 0, N, N).data;
   let R = 0, G = 0, B = 0;
   for (let i = 0; i < d.length; i += 4){ R += d[i]; G += d[i+1]; B += d[i+2]; }
   const n = d.length / 4; R /= n; G /= n; B /= n;
-  const lum = (0.2126*R + 0.7152*G + 0.0722*B) / 255;
-  const k = 0.12;                       // ① 新值只占 12%，画面不会跟着环境一跳一跳
-  LIGHT.lum += (lum   - LIGHT.lum) * k;
-  LIGHT.r   += (R/255 - LIGHT.r)  * k;
-  LIGHT.b   += (B/255 - LIGHT.b)  * k;
-  // 环境饱和度：阴天/室内偏灰、晴天艳。立绘不跟着降饱和，就会一眼看出是贴上去的
   const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
-  LIGHT.sat += ((mx ? (mx - mn) / mx : 0) - LIGHT.sat) * k;
-  LIGHT.ok = true;
+  return { lum: (0.2126*R + 0.7152*G + 0.0722*B) / 255, r: R/255, b: B/255,
+           sat: mx ? (mx - mn) / mx : 0 };
+}
+
+/**
+ * 临时换一组光照值跑一次渲染。
+ * 出图要用"**这一帧**"的量，不能用预览那套平滑值 ——
+ * 拖着手机转过去、环境变了再按快门时，平滑值还停在上一秒的环境上。
+ * 用完还原，并把缓存标记清掉，免得预览被这次出图带偏。
+ */
+function withLight(m, fn){
+  const keep = { lum: LIGHT.lum, r: LIGHT.r, b: LIGHT.b, sat: LIGHT.sat, ok: LIGHT.ok };
+  LIGHT.lum = m.lum; LIGHT.r = m.r; LIGHT.b = m.b; LIGHT.sat = m.sat; LIGHT.ok = true;
+  litSig = '';                       // 强制按新值重烘
+  try { fn(); }
+  finally {
+    LIGHT.lum = keep.lum; LIGHT.r = keep.r; LIGHT.b = keep.b; LIGHT.sat = keep.sat; LIGHT.ok = keep.ok;
+    litSig = '';                     // 下次预览会按还原后的值重烘一次（只多一次，可忽略）
+  }
+}
+
+/** 把采样框夹进源画面里 */
+function clampRegion(r, W, H){
+  if (!r) return { sx: 0, sy: 0, sw: W, sh: H };        // 没立绘就退化成整帧
+  let { sx, sy, sw, sh } = r;
+  sw = Math.min(sw, W); sh = Math.min(sh, H);
+  sx = Math.max(0, Math.min(W - sw, sx));
+  sy = Math.max(0, Math.min(H - sh, sy));
+  return { sx, sy, sw, sh };
+}
+
+/** 立绘那一带在**画布坐标**里的采样框（sampleLight 和出图共用同一口径） */
+function lightRegion(){
+  const cp = currentPlacement();
+  if (!cp) return null;
+  const mx = cp.w * 0.35;
+  return { sx: cp.u - cp.w/2 - mx, sy: cp.v - cp.h/2 - mx,
+           sw: cp.w + mx*2,          sh: cp.h + mx*2 };
 }
 
 /** 立绘自己的平均亮度。⚠ 透明像素必须跳过 —— 不算的话一张大半透明的立绘会被当成很暗 */
@@ -899,78 +1015,195 @@ function charLum(){
   const g2 = c.getContext('2d', { willReadFrequently: true });
   g2.drawImage(chCanvas, 0, 0, w, h);
   const d = g2.getImageData(0, 0, w, h).data;
-  let L = 0, Sa = 0, n = 0;
+  let L = 0, Sa = 0, Ra = 0, Ba = 0, n = 0;
   for (let i = 0; i < d.length; i += 4){
     if (d[i+3] < 8) continue;
     L += (0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2]) / 255;
     const mx = Math.max(d[i], d[i+1], d[i+2]), mn = Math.min(d[i], d[i+1], d[i+2]);
     Sa += mx ? (mx - mn) / mx : 0;
+    Ra += d[i]; Ba += d[i+2];
     n++;
   }
   if (!n) return 0.5;
   chSat = Sa / n;
+  chR = Ra / n / 255; chB = Ba / n / 255;      // 立绘自己的暖冷比，色温增益要用
   return L / n;
 }
 
 /** ctx.filter 那一串：亮度 / 反差。色温另外叠，见 lightTint */
-function lightFilter(){
-  if (!LIGHT_ON || !LIGHT.ok || !chLum) return 'none';
-  // ② 强度 80%：目标是「融入环境」，靠得太轻等于没做；留 20% 是别把立绘自己的颜色洗掉
-  const want = chLum + (LIGHT.lum - chLum) * 0.80;
-  const bright   = clampN(want / chLum, 0.5, 1.8);
-  const contrast = clampN(0.92 + LIGHT.lum * 0.2, 0.85, 1.12);
-  // 饱和度也往环境靠 —— 阴天/室内的画面偏灰，立绘还是艳的，一眼就是贴上去的
-  const sat = clampN(1 + (LIGHT.sat - chSat) * 0.9, 0.6, 1.4);
-  return `brightness(${bright.toFixed(3)}) contrast(${contrast.toFixed(3)}) saturate(${sat.toFixed(3)})`;
-}
+// （lightFilter / lightTint 已删：V4 改成逐像素烘制之后没人调它们了。
+//   filter 那套做不了 R/B 通道增益，是色温追不上的根因。）
 
-/** 色温 + ③ 空间渐变 */
-function lightTint(){
-  const rb = LIGHT.r - LIGHT.b;      // >0 偏暖（钨丝灯/黄昏），<0 偏冷（日光/阴天）
-  const a = Math.min(0.20, Math.abs(rb) * 0.5);
-  if (a < 0.02 || !litCtx || !litCv || !litCv.height) return null;
-  const col = rb > 0 ? '255,186,112' : '148,188,255';
-  const gr = litCtx.createLinearGradient(0, 0, 0, litCv.height);
-  gr.addColorStop(0, `rgba(${col},${a.toFixed(3)})`);
-  gr.addColorStop(1, `rgba(${col},${(a * 0.35).toFixed(3)})`);
-  return gr;
-}
-
-/** 烘一版"已经匹配过光线"的立绘。光线值没实质变化就不重烘 */
 function bakeLit(){
   if (!chCanvas || !chCanvas.width) return;
   if (litFor !== chCanvas){ litFor = chCanvas; chLum = 0; litSig = ''; litCv = null; }
   if (!chLum) chLum = charLum();
+  // ⚠ sig 必须把三个分开关也算进去，否则切开关时缓存不失效、烘的还是上一版
   const sig = (LIGHT_ON && LIGHT.ok)
-    ? LIGHT.lum.toFixed(1) + '|' + (LIGHT.r - LIGHT.b).toFixed(1) : 'off';
+    ? LIGHT.lum.toFixed(1) + '|' + (LIGHT.r - LIGHT.b).toFixed(1) + '|' +
+      (LIGHT_BRI?1:0) + (LIGHT_TMP?1:0) + (LIGHT_SAT?1:0) +
+      (LIGHT_GRN?1:0) + (LIGHT_SFT?1:0) + '|' + litScaleBucket() : 'off';
   if (sig === litSig && litCv && litCv.width === chCanvas.width) return;
   litSig = sig;
+
+  const w = chCanvas.width, h = chCanvas.height;
   if (!litCv){ litCv = document.createElement('canvas'); litCtx = litCv.getContext('2d'); }
-  if (litCv.width !== chCanvas.width || litCv.height !== chCanvas.height){
-    litCv.width = chCanvas.width; litCv.height = chCanvas.height;
+  if (litCv.width !== w || litCv.height !== h){ litCv.width = w; litCv.height = h; }
+  litCtx.clearRect(0, 0, w, h);
+  if (!LIGHT_ON || !LIGHT.ok) { litCtx.drawImage(chCanvas, 0, 0); return; }
+
+  // ★ 逐像素烘一版，不用 ctx.filter。
+  //   原因：filter 只能调"整体亮度/反差/饱和"，**做不了 R/B 通道增益**，
+  //   而色温恰恰是"融入环境"最关键的一路。之前用"叠一层纯色"凑，实测会跟亮度增益打架 ——
+  //   网格数据：环境暖冷比 1.94 的暖餐厅，立绘只从 1.21 追到 1.42；冷场景甚至追反。
+  //   逐像素能一次性把 亮度 + 白平衡 + 饱和度 都算准。开销可接受：
+  //   只在换立绘或光线明显变化时跑一次（litSig 挡住重复），不是每帧。
+  let src;
+  try { src = chCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h); }
+  catch (e) { litCtx.drawImage(chCanvas, 0, 0); return; }   // 读不到就退回原图，别让整页炸
+  const d = src.data, out = litCtx.createImageData(w, h), o = out.data;
+
+  // 明暗：环境相对中性(0.42)的受限增益。**不追"人物平均=环境平均"** ——
+  //   深色衣服在亮房间里本来就该比白墙暗，追平必然把深色提亮成发光的。
+  const gL = LIGHT_BRI ? clampN(LIGHT.lum / LIGHT_NEUTRAL, LIGHT_GAIN_MIN, LIGHT_GAIN_MAX) : 1;
+  // ⚠ gamma 指数要**软化**。直接用 1/gL（暗场景 → 1.67）会把暗部压穿：
+  //   分档实测暗餐厅那格，暗部亮度 0.144 → 0.045、局部反差 0.052 → 0.024（-54%），
+  //   深色头发和衣服糊成一块。而**整体**反差反而是涨的（亮部涨了，把暗部平均掉），
+  //   所以只看整体永远发现不了 —— 是分档量出来的。声明在这儿是因为下面白平衡的基准也要用它。
+  const inv = Math.pow(1 / gL, 0.6);
+  // 白平衡：把立绘的 R/B 往环境的 R/B 挪 K 那一份（对数空间，两端对称，整体亮度不变）
+  const envRB  = Math.max(0.05, LIGHT.r) / Math.max(0.05, LIGHT.b);
+  const charRB = Math.max(0.05, chR)     / Math.max(0.05, chB);
+  const K = 0.75;
+  // ⚠ 增益的**基准**必须是"过完曲线之后"的立绘色比，不是原始的。
+  //   gamma 是非线性的，它自己就会把 R/B 比抬一截（实测 1.21 → 1.44）。
+  //   拿原始 1.21 当基准去算增益，等于在抬高的底上再加一层 → 冲过环境值
+  //   （indoor_0 环境 1.72 被染成 1.86、night_4 环境 1.15 染成 1.38）。
+  //   均值经 gamma 映射约等于 v^inv，所以基准取 pow(charRB, inv)。
+  const charRBg = Math.pow(charRB, inv);
+  let ratio = LIGHT_TMP ? Math.pow(envRB / charRBg, K) : 1;
+  // ⚠ 增益必须**限幅**。分档实测：暗餐厅那格白花那一档的 R/B 比从 1.03 冲到 1.69 ——
+  //   白花被染成黄色。原因是那里的环境比立绘暖得多，算出来的 gR 到了 1.34。
+  //   高光本来就是光源色的直接反映，会被染，但不该染成这样。夹住，并保持 gR·gB=1（不影响整体明暗）。
+  // 完整增益（中低调用）与限幅增益（高光用）两套，逐像素按亮度在两者之间过渡。
+  //   为什么分：高光本来就只该反映**光源色**，不该被材料色带跑（白花在暖光下偏暖是对的，
+  //   偏到 1.69 就成染黄了）；而中间调的衣服/头发该跟着环境走，限幅会把这一路削弱。
+  const GMIN = 0.85, GMAX = 1.18;
+  const gRfull = Math.sqrt(ratio);
+  const gRcap = gRfull < GMIN ? GMIN : gRfull > GMAX ? GMAX : gRfull;
+  // 饱和度：往环境靠（阴天/室内偏灰，立绘还艳着，一眼就是贴上去的）
+  // 降饱和系数从 0.6 收到 0.3：它和白平衡是**反向**的（往灰靠 = 把 R/B 比压向 1），
+  // 给太猛会把色温那一路抵消掉。
+  const sK = LIGHT_SAT ? clampN(1 + (LIGHT.sat - chSat) * 0.3, 0.75, 1.25) : 1;
+
+  // ★ 明暗走**曲线**，不走乘法。
+  //   纯乘法会把**反差一起乘掉** —— 实测暗场景里立绘自己的亮度标准差从 0.256 掉到 0.154（-40%），
+  //   人物糊成一块暗色剪影。数字完全对得上：0.256 × 0.6 = 0.154。
+  //   现实里物体进暗环境是"暗部沉下去、亮部保留"，不是整体乘个系数，所以用 gamma：
+  //     out = 255 · (v/255)^(1/gL)
+  //   同一个均值，但亮部留得住。用 256 项查表，逐像素只多一次数组访问。
+
+  const clamp255 = (x) => x < 0 ? 0 : x > 255 ? 255 : x;
+  // ⚠ 白平衡的通道增益**不能放进这条曲线里**。
+  //   gamma 是非线性的：R 和 B 数值不同，同一条曲线映射出来的比值会变 ——
+  //   实测"只开亮度"那格色比就从 1.21 涨到 1.44，全开时直接冲过环境值（1.72 的环境染成 2.12）。
+  //   所以曲线只管明暗（三通道同一条），增益在曲线**之后**按线性乘上去。
+  // 亮度过渡权重：<=165 用完整增益，>=215 用限幅增益，中间线性过渡
+  const wOf = (v) => v <= 165 ? 0 : v >= 215 ? 1 : (v - 165) / 50;
+  const lutR = new Uint8Array(256), lutG = new Uint8Array(256), lutB = new Uint8Array(256);
+  for (let v = 0; v < 256; v++){
+    const cur = Math.pow(v / 255, inv) * 255;
+    const w = wOf(v);
+    lutR[v] = Math.round(clamp255(cur * (gRfull + (gRcap - gRfull) * w)));
+    lutB[v] = Math.round(clamp255(cur * (1 / gRfull + (1 / gRcap - 1 / gRfull) * w)));
+    lutG[v] = Math.round(clamp255(cur));
   }
-  litCtx.setTransform(1, 0, 0, 1, 0, 0);
-  litCtx.clearRect(0, 0, litCv.width, litCv.height);
-  litCtx.filter = lightFilter();
-  litCtx.drawImage(chCanvas, 0, 0);
-  litCtx.filter = 'none';
-  // 暗环境抬黑位：只压亮度的话立绘会变成剪纸。往上加一个常量，黑的地方也抬起来
-  const lift = clampN((0.42 - LIGHT.lum) * 0.4, 0, 0.16);
-  if (lift > 0.01){
-    litCtx.globalCompositeOperation = 'source-atop';
-    litCtx.fillStyle = `rgba(255,255,255,${lift.toFixed(3)})`;
-    litCtx.fillRect(0, 0, litCv.width, litCv.height);
-    litCtx.globalCompositeOperation = 'source-over';
+
+  // ★ 颗粒幅度：跟着**环境**亮度走，不跟立绘自己走。
+  //   同一张立绘在暗餐厅里该有噪点、在亮海滩上不该有 —— 噪点是"拍摄条件"的属性，
+  //   不是"被拍物体"的属性。这也是它跟另外三个分量最大的不同。
+  //
+  // ★★ 再乘一个**缩放补偿** —— 这条是踩出来的，不补的话整套白做：
+  //   颗粒是在**原生分辨率**上烘的（立绘 1509px 高），但它在画面里只画成 300px 高，
+  //   5 倍下采样会把 ±5 的噪声平均成 ±1，等于没加。而且立绘越小越没有，
+  //   恰好是最需要融入的场景（远景全身）最没效果。
+  //   所以缩得越小、烘进去的颗粒越大，落到屏幕上才是同一个量级。
+  //   上限 3.2 倍：再往上补，暗部那头的噪声会被 0 削平（黑位反而变干净，不自然）。
+  const gAmp = LIGHT_GRN
+    ? clampN(GRN_MAX * (1 - LIGHT.lum * 1.35), GRN_MIN, GRN_MAX) *
+      clampN(1 / litScaleBucket(), 1, GRN_COMP_MAX)
+    : 0;
+  const tile = gAmp > 0 ? grainTile() : null;
+  const TM = 255;
+  let gx = 0, gy = 0;
+
+  for (let i = 0; i < d.length; i += 4){
+    const x0 = gx, y0 = gy;
+    if (++gx > w - 1){ gx = 0; gy++; }     // ⚠ 必须在 continue 之前推进，否则透明像素会把坐标带偏
+    if (d[i+3] === 0){ o[i+3] = 0; continue; }
+    let r = lutR[d[i]], gg = lutG[d[i+1]], b = lutB[d[i+2]];
+    if (sK !== 1){                                  // 朝同亮度的灰靠/离
+      const y = 0.2126*r + 0.7152*gg + 0.0722*b;
+      r = y + (r - y) * sK; gg = y + (gg - y) * sK; b = y + (b - y) * sK;
+    }
+    if (tile){
+      // 只加在**颜色**上，一个字节都不碰 alpha —— 加 alpha 会让边缘长出毛刺、
+      // 还会把半透明的边变成会呼吸的（每次重烘孔径都在抖）。
+      const n = tile[(x0 & TM) + ((y0 & TM) << 8)];
+      // 主要是亮度噪声；色度噪声留一点点（真彩噪），手机降噪后剩的本来就不多。
+      const nL = n * gAmp, nC = n * gAmp * 0.35;
+      r += nL; gg += nL - nC; b += nL + nC;
+    }
+    o[i] = clamp255(r); o[i+1] = clamp255(gg); o[i+2] = clamp255(b); o[i+3] = d[i+3];
   }
-  const tint = lightTint();
-  if (tint){
-    litCtx.globalCompositeOperation = 'source-atop';   // 只染立绘本身，不染透明区
-    litCtx.fillStyle = tint;
-    litCtx.fillRect(0, 0, litCv.width, litCv.height);
-    litCtx.globalCompositeOperation = 'source-over';
+  // ★ 边缘柔化（默认关）：立绘的边是刀口级的，照片里没有这种边 ——
+  //   那一圈锐利的轮廓就是"贴上去"最硬的证据。这里**只柔化 alpha，RGB 一个字节都不动**。
+  //   只动 alpha 有两个好处：
+  //     ① 不会把立绘内部的细节糊掉 —— 内部 alpha 恒为 255，模糊完还是 255；
+  //     ② 不会出黑边 —— 半透明像素带的是立绘**自己的颜色**，叠上去是正经的 alpha 混合，
+  //        不是"先跟黑混合再叠上去"。
+  //   为什么不用 ctx.filter='blur(x)'：那玩意儿在 --disable-gpu 的 headless 里**静默失效**
+  //   （filter 属性读得回来 "blur(3px)"，像素一个都不动 —— 实测高频 4.05 → 4.05），
+  //   我在这台机器上根本验证不了；老一点的 Safari 同样静默忽略。
+  //   自己算三抽头：哪儿都能跑、哪儿都能测。分离式两趟（先横后竖），
+  //   开销只有那个逐像素循环的零头，而且只在换立绘/换光时才跑。
+  if (LIGHT_SFT && SFT_PX > 0){
+    const k = clampN(SFT_PX, 0, 1);
+    const edge = k / 2, mid = 1 - k;          // k=0 恒等，k=1 最狠
+    const np = w * h;
+    if (!sftA || sftA.length !== np){ sftA = new Uint8ClampedArray(np); sftB = new Uint8ClampedArray(np); }
+    for (let p = 0, i = 3; p < np; p++, i += 4) sftA[p] = d[i];
+    for (let y = 0; y < h; y++){
+      const row = y * w;
+      for (let x = 0; x < w; x++){
+        // 边界夹住取自己，不要把画布外当成透明 —— 立绘是紧贴裁边的，
+        // 按透明处理会给四条边额外开一圈口子。
+        const l = sftA[row + (x > 0 ? x - 1 : 0)];
+        const r2 = sftA[row + (x < w - 1 ? x + 1 : w - 1)];
+        sftB[row + x] = mid * sftA[row + x] + edge * (l + r2);
+      }
+    }
+    for (let y = 0; y < h; y++){
+      const up = (y > 0 ? y - 1 : 0) * w, dn = (y < h - 1 ? y + 1 : h - 1) * w, row = y * w;
+      for (let x = 0; x < w; x++)
+        sftA[row + x] = mid * sftB[row + x] + edge * (sftB[up + x] + sftB[dn + x]);
+    }
+    for (let p = 0, i = 3; p < np; p++, i += 4) o[i] = sftA[p];
   }
+  litCtx.putImageData(out, 0, 0);
+  return;
 }
 let litFor = null;
+// 柔化用的两张 alpha 缓冲，只按尺寸重建一次 —— 烘焙本来就够重，别再给 GC 添活
+let sftA = null, sftB = null;
+// 立绘这一帧被画成多大（屏幕上的宽 ÷ 它自己的像素宽），由 drawCharTo 每次填。
+// 颗粒要靠它做缩放补偿。**必须分档**：拖大小滑块时如果每变一点就重烘一次，
+// 一次烘焙是百万像素级的循环，拖着会卡；分档之后只在跨档时重烘。
+let litScale = 1;
+function litScaleBucket(){
+  const s = clampN(litScale, 0.05, 1);
+  return s >= 1 ? 1 : Math.pow(2, Math.round(Math.log2(s)));   // 1 / 0.5 / 0.25 / 0.125 …
+}
 
 /** 预览和出图都用这一张 —— 两边同源，照片和立绘层才对得上 */
 function litChar(){
@@ -982,6 +1215,15 @@ function litChar(){
 $('tLight').addEventListener('click', e => {
   LIGHT_ON = !LIGHT_ON; litSig = ''; litFor = null;      // 换开关要重烘
   e.target.classList.toggle('on', LIGHT_ON);
+  draw();
+});
+// 颗粒单独一个开关。跟「光线匹配」分开是因为它们的**量法不一样** ——
+// 光色是"颜色对不对"，颗粒是"质感像不像手机拍的"，混在一个总开关里没法单独判断。
+// 关掉光线匹配时颗粒也跟着不起作用（litChar 直接返回原图），这是故意的：
+// 那个总开关的语义是"这张立绘原样贴上去"。
+$('tGrain').addEventListener('click', e => {
+  LIGHT_GRN = !LIGHT_GRN; litSig = ''; litFor = null;
+  e.target.classList.toggle('on', LIGHT_GRN);
   draw();
 });
 
@@ -1839,6 +2081,8 @@ function drawCharTo(g){
   g.save();
   g.translate(c.u, c.v);
   g.rotate(c.rot);
+  // ⚠ 必须在 litChar() 之前填 —— 颗粒的缩放补偿要靠它（见 bakeLit）
+  litScale = chCanvas.width ? c.w / chCanvas.width : 1;
   // 用烘好的"匹配过光线"的那版；没开光线匹配时 litChar() 直接返回原图
   g.drawImage(litChar(), -c.w/2, -c.h/2, c.w, c.h);
   g.restore();
@@ -2121,7 +2365,14 @@ async function saveAll(files, zipName, previewUrl){
  *   直接 cv.toDataURL() 拿到的是浮层自己（空的），必须另起一块离屏画布重画。
  *   取景器和出图都走 drawCharTo()，所以照片里的立绘和眼睛看到的分毫不差。
  */
-function buildShotCanvas(){ return composeShot(v); }
+// 出图那一帧采到的光。照片和立绘层**共用同一套** —— 分别采的话两张图会配不同的光，
+// 叠回去就不是逐像素对得上了（导出流程的核心承诺就是"严丝合缝"）。
+let LAST_SHOT_LIGHT = null;
+function buildShotCanvas(){
+  const r = composeShot(v);
+  LAST_SHOT_LIGHT = r.light;
+  return r;
+}
 
 /**
  * 出图那一遍变换的**唯一一份实现**：拍两张图跑的都是它。
@@ -2132,19 +2383,31 @@ function buildShotCanvas(){ return composeShot(v); }
  *   src=null 这条路上**没有**视频帧、没有地面网格、没有地平线、没有人体骨架，
  *   也没有取景框压暗和三分线 —— 那些只在实时预览的 draw() 里画，出不来的。
  */
-function composeShot(src){
+function composeShot(src, lightM){
   const R = frameRect();
   const full = document.createElement('canvas');
   full.width = cv.width; full.height = cv.height;
   const g = full.getContext('2d');
   if (src && src.videoWidth) g.drawImage(src, 0, 0, cv.width, cv.height);
-  drawCharTo(g);
+  // ★ 出图当场再采一次光，量的是**正要导出的这一帧**。
+  //   预览用的是平滑值（LIGHT_K=0.12，防闪），但出图不能跟着它 ——
+  //   拖着手机转过去、环境变了再按快门时，平滑值还停在上一秒的环境上，导出的照片就配错光。
+  //   光的来源：调用方给了就用（立绘层要跟照片**同一套**），没给就当场从这一帧量。
+  let m = lightM || null;
+  if (!m && src && src.videoWidth && LIGHT_ON){
+    const reg = clampRegion(lightRegion(), cv.width, cv.height);
+    m = measureRegion(full, cv.width, cv.height, reg.sx, reg.sy, reg.sw, reg.sh, 32);
+  }
+  if (m) withLight(m, () => drawCharTo(g));
+  else   drawCharTo(g);
   const off = document.createElement('canvas');
   off.width  = Math.max(1, Math.round(R.w));
   off.height = Math.max(1, Math.round(R.h));
   // 同一个裁切框、同一个（可能是小数的）偏移 —— 两张图的像素就此一一对应
   off.getContext('2d').drawImage(full, -R.x, -R.y);
-  return { canvas: off, rect: R };
+  // 把这一遍实际用到的光带出去 —— 立绘层必须跟照片用**同一套**，
+  // 否则两张图叠回去就对不上（测试里的"逐像素一致"就是这么抓到我的）。
+  return { canvas: off, rect: R, light: m };
 }
 
 /**
@@ -2153,7 +2416,7 @@ function composeShot(src){
  * 所以它**不是**原始立绘文件，下游拿到不用再算一遍偏移。
  * 尺寸和 shot_*.jpg 逐像素相同（都是 frameRect 圆整后的那个矩形）。
  */
-function buildCharCanvas(){ return composeShot(null); }
+function buildCharCanvas(){ return composeShot(null, LAST_SHOT_LIGHT); }
 
 /**
  * canvas → Blob。一次要出两张图，回调套回调就成金字塔了，包成 Promise。
