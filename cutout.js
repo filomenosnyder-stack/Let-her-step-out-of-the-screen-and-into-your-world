@@ -324,20 +324,19 @@
     });
   }
 
-  /** 带进度的取文件。onnxruntime 自己不会报进度，所以模型由我们自己抓成 ArrayBuffer 再喂它 */
-  async function fetchBuf(url, onProgress){
+  /** 整块取一个文件。onBytes(n) 报"这一块又收到了 n 字节"。 */
+  async function fetchWhole(url, onBytes){
     const r = await fetch(url);
-    if (!r.ok) throw new Error(url + ' → HTTP ' + r.status);
-    if (!r.body) return new Uint8Array(await r.arrayBuffer());
+    if (!r.ok) throw new Error(url.split('/').pop() + ' → HTTP ' + r.status);
+    if (!r.body){ const b = new Uint8Array(await r.arrayBuffer()); onBytes && onBytes(b.length); return b; }
 
-    // ★★ content-length 是**传输**长度，不是解压后的长度 —— 绝不能拿它来分配数组。
-    //   GitHub Pages 对 .onnx 发 Content-Encoding: gzip：头部写 27MB，浏览器透明解压
-    //   后实际吐出 44MB。按 27MB 分配再 set 到第 27MB 处就是
-    //     RangeError: offset is out of bounds   at Uint8Array.set   at fetchBuf
-    //   本地 serve.mjs 不压缩、长度正好 → **本地怎么测都是好的**，2026-09-20 上线才炸。
-    //   所以：长度只当进度分母的**估计值**（超过就封顶，别让进度条跑到 100% 以上），
-    //   内存分块收完再拼。
-    const hint = +r.headers.get('content-length') || 0;
+    // ★★ 绝不能按 content-length 预分配。
+    //   Pages 对 .onnx 发 Content-Encoding: gzip：头部量的是**压缩后**的 27MB，
+    //   而 reader 吐出来的每一块都是**解压后**的，一共 44MB。按 27MB 分配再 set 到
+    //   第 27MB 处就是 RangeError: offset is out of bounds。
+    //   本地 serve.mjs 不压缩、长度正好 → **本地怎么测都是好的**，一上线就炸（踩过）。
+    //   所以一律先收块、最后拼成一块长度恰好的。onnxruntime 直接按 byteLength 解析，
+    //   多一个字节都当坏文件。
     const chunks = [];
     let got = 0;
     const reader = r.body.getReader();
@@ -345,16 +344,154 @@
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value); got += value.length;
-      if (onProgress) onProgress(hint > 0 ? Math.min(got / hint, 0.99) : 0);
+      onBytes && onBytes(value.length);
     }
-    // 拼成**长度恰好**的一块。onnxruntime 是直接按 byteLength 解析的，
-    // 多一个字节都算坏文件；单块时也不能直接把 reader 给的 view 交出去。
     const buf = new Uint8Array(got);
     let off = 0;
     for (const c of chunks){ buf.set(c, off); off += c.length; }
-    onProgress && onProgress(1);
     return buf;
   }
+
+  // ── 模型：下载 / 导入 ─────────────────────────────────────────
+  //
+  // 站点上就一个整文件（42MB）。国内裸连 GitHub Pages 实测只有 **83 KB/s**
+  // （走代理 15MB/s，差 180 倍）—— 下这份要五分半，中途还常断。所以除了下载，
+  // 这条线还给了**导入**：从 QQ 群 / 网盘把同一个文件拿下来，选进来即可，
+  // 走的是腾讯自己的 CDN，国内快得多。拿到过一次就存本地，之后再也不下。
+  //
+  // 文件身份写死在这儿。少了它，两条路都会安静地接受一个坏文件 ——
+  // 那比直接报错难查得多（模型坏一个字节，输出是一堆看着像"抠错了"的糊图）。
+  // ⚠ 换模型必须同时改这三个数（tools/split_model.mjs 会把它们打出来），
+  //   改漏了 make_dist 会拦下来（它拿这三个数去核对 anime/ 里那份真文件）。
+  const MODEL      = 'isnet-anime-q8';
+  const MODEL_FILE = MODEL + '.onnx';
+  const MODEL_SIZE = 44214375;
+  const MODEL_SHA  = 'cb5f78506887f5250352c04ec8ea242874db3434f0b4a216d041a810b20377e3';
+
+  // 用户导入 / 本地缓存里读出来的整份模型。有它就不走下载那条路。
+  let _segBuf = null;
+
+  /** 下载整份模型。onnxruntime 自己不报进度，所以自己抓成 ArrayBuffer 再喂它。 */
+  async function fetchModel(onProgress){
+    let got = 0;
+    onProgress && onProgress('下载模型…', 0, 0, MODEL_SIZE);
+    const buf = await fetchWhole(SEG + MODEL_FILE, (n) => {
+      got += n;
+      // 比例用**写死的** MODEL_SIZE 算，不用 content-length —— Pages 发 gzip 时
+      // 头部报的是压缩后的 25.8MB，拿它当分母会让进度条冲到 99% 就不动（踩过）。
+      onProgress && onProgress('下载模型…', Math.min(got / MODEL_SIZE, 1), got, MODEL_SIZE);
+    });
+    if (buf.length !== MODEL_SIZE)
+      throw new Error(`模型大小不对：${buf.length} 字节，应该是 ${MODEL_SIZE} —— 下到一半断了，再点一次`);
+    await verifyModel(buf, '模型校验没过（下载途中被改坏了），再点一次重下');
+    return buf;
+  }
+
+  /** 过一次 sha256。42MB 约几十毫秒 —— 换来的是"拿到的是不是这个模型"有确定答案。
+   *  ⚠ crypto.subtle 只在安全上下文里有（https / localhost）。没有就跳过：
+   *    校验不了不该让整个功能不能用。 */
+  async function verifyModel(buf, msg){
+    const got = await sha256Hex(buf);
+    if (got && got !== MODEL_SHA) throw new Error(msg);
+    return got;
+  }
+
+  // ── 本地缓存（IndexedDB）──────────────────────────────────────
+  //
+  // 模型 42MB，国内裸连 GitHub Pages 只有 83KB/s。所以只要拿到过一次 —— 不管是
+  // 下载下完的，还是用户自己从别处（QQ 群 / 网盘）导进来的 —— 都必须**留下来**，
+  // 下次打开这个页面直接从本地读，一个字节都不下。
+  //
+  // ⚠ 存的是 { sha, size, buf } 整条记录，读回来**重新校验 sha**：
+  //   换模型以后老缓存会被 sha 对不上自动作废；磁盘错误写坏的那份也不会被当成好模型用。
+  //   不校验的话，一个坏了 1 个字节的模型会安静地输出一堆糊图，比直接报错难查得多。
+  const IDB_NAME = 'arcam-model', IDB_STORE = 'files', IDB_KEY = 'model';
+
+  function idbOpen(){
+    return new Promise((res, rej) => {
+      if (!global.indexedDB) return rej(new Error('这个浏览器没有 IndexedDB'));
+      const rq = indexedDB.open(IDB_NAME, 1);
+      rq.onupgradeneeded = () => { try { rq.result.createObjectStore(IDB_STORE); } catch (e) {} };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error || new Error('IndexedDB 打不开'));
+    });
+  }
+  async function idbRun(mode, fn){
+    const db = await idbOpen();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(IDB_STORE, mode);
+      const rq = fn(tx.objectStore(IDB_STORE));
+      tx.oncomplete = () => res(rq ? rq.result : undefined);
+      tx.onerror = () => rej(tx.error || new Error('IndexedDB 事务失败'));
+      tx.onabort = () => rej(tx.error || new Error('IndexedDB 事务被中止'));
+    });
+  }
+  const idbGet = (k) => idbRun('readonly',  (s) => s.get(k));
+  const idbPut = (k, v) => idbRun('readwrite', (s) => s.put(v, k));
+  const idbDel = (k) => idbRun('readwrite', (s) => s.delete(k));
+
+  /** 模型缓存读不出来不该让整个功能挂掉（无痕模式、配额满、用户禁了存储）——
+   *  这些都是"没有缓存"而已，照常走下载。所以一律吞掉异常返回 null。 */
+  async function readCachedModel(){
+    let rec = null;
+    try { rec = await idbGet(IDB_KEY); } catch (e) { return null; }
+    if (!rec || !rec.buf || !rec.sha) return null;
+    const buf = new Uint8Array(rec.buf);
+    const got = await sha256Hex(buf);
+    if (got && got !== rec.sha){ try { await idbDel(IDB_KEY); } catch (e) {} return null; }
+    return { buf, sha: rec.sha, size: buf.length };
+  }
+  async function writeCachedModel(buf, sha){
+    try { await idbPut(IDB_KEY, { sha, size: buf.length, buf }); return true; }
+    catch (e) { return false; }        // 存不下就算了，下次照旧下载
+  }
+
+  async function sha256Hex(buf){
+    const cs = global.crypto && global.crypto.subtle;
+    if (!cs || !cs.digest) return null;     // 非安全上下文拿不到，调用方要容忍 null
+    const d = await cs.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(d)).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+
+  /**
+   * 导入本地模型文件。给"从 QQ 群 / 网盘拿到模型的人"用 —— 国内从群里下比从
+   * GitHub Pages 下快得多（腾讯自己的 CDN），导进来以后存在本地，再也不用下。
+   *
+   * 两种文件都认：
+   *   isnet-anime-q8.onnx      42MB，原样
+   *   isnet-anime-q8.onnx.gz   25.8MB，预先压过的（群里传这个省四成流量和时间）
+   * ⚠ 认的是**文件头魔数**（1f 8b），不是扩展名 —— 群里传一圈名字常被改得乱七八糟。
+   *
+   * @returns {Promise<{size:number, sha:string|null, unzipped:boolean, saved:boolean}>}
+   */
+  async function importModel(file, onProgress){
+    if (!file) throw new Error('没选文件');
+    onProgress && onProgress('读取文件…', 0);
+    let buf = new Uint8Array(await file.arrayBuffer());
+    let unzipped = false;
+    if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b){
+      if (!global.DecompressionStream) throw new Error('这个浏览器解不开 .gz，请传没压缩的 .onnx');
+      onProgress && onProgress('解压中…', 0);
+      const st = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+      buf = new Uint8Array(await new Response(st).arrayBuffer());
+      unzipped = true;
+    }
+    onProgress && onProgress('校验中…', 0);
+    // ⚠ 校验用的是**写死在文件里的** MODEL_SIZE / MODEL_SHA，不去站点取任何东西 ——
+    //   用户很可能正是因为连不上站点才来导入的，那时候再去拉清单是本末倒置。
+    if (buf.length !== MODEL_SIZE)
+      throw new Error(`大小不对：${buf.length} 字节，应该是 ${MODEL_SIZE}。多半是下了一半，或者下错了文件。`);
+    const sha = await verifyModel(buf, '校验对不上：这不是这个模型文件（或者传的过程中弄坏了）');
+    const saved = await writeCachedModel(buf, sha || '');
+    _segBuf = buf; _segSess = null; _segLoading = null;    // 让下一次 loadAnimeSeg 直接用这份
+    onProgress && onProgress('已导入', 1);
+    return { size: buf.length, sha, unzipped, saved };
+  }
+
+  /** 本地有没有存着模型（界面用：有的话就不用再劝人下载了） */
+  async function hasLocalModel(){ return !!(await readCachedModel()); }
+  /** 把本地缓存删掉（换模型、或者用户想重新下一份时用） */
+  async function forgetLocalModel(){ try { await idbDel(IDB_KEY); } catch (e) {} _segBuf = null; _segSess = null; _segLoading = null; }
 
   /** 载入运行时 + 模型。幂等，重复调不会载第二遍。 */
   function loadAnimeSeg(onProgress){
@@ -369,9 +506,28 @@
       // ⚠ 多线程要 COOP/COEP 跨源隔离头，GitHub Pages 给不了 → 只能单线程
       ort.env.wasm.numThreads = 1;
       ort.env.wasm.simd = true;
-      onProgress && onProgress('下载模型 42MB…', 0);
-      const buf = await fetchBuf(SEG + 'isnet-anime-q8.onnx',
-        f => onProgress && onProgress('下载模型 42MB…', f));
+      // 模型的三个来源，按"快 → 慢"的顺序试：
+      //   ① 本次会话里已经在手里了（刚导入过 / 刚下过）—— 零成本
+      //   ② IndexedDB 里存着（上次下好或导入的）—— 读盘，40MB 也就几百毫秒
+      //   ③ 从站点分块下载 —— 最慢的那条，因为国内裸连 Pages 只有 83KB/s
+      let buf = _segBuf;
+      if (!buf){
+        onProgress && onProgress('读取本地模型…', 0);
+        const rec = await readCachedModel();
+        if (rec){
+          buf = rec.buf; _segBuf = buf;
+        }
+      }
+      if (!buf){
+        // onProgress(stage, 比例, 已收字节, 总字节)
+        // ★ 比例是真的：分母是写死的 MODEL_SIZE，不是 content-length
+        //   那个压缩后的假数字。之前它会在真实进度六成处冲到 99% 然后不动。
+        onProgress && onProgress('下载模型…', 0, 0, 0);
+        buf = await fetchModel(onProgress);
+        // 下完存起来。下次（哪怕关掉页面重开）就不再下这 42MB 了。
+        await writeCachedModel(buf, MODEL_SHA);
+        _segBuf = buf;
+      }
       onProgress && onProgress('载入模型…', 0);
       _segSess = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
       return _segSess;
@@ -595,5 +751,7 @@
     loadAnimeSeg, animeCut,
     contentBounds, cropToCanvas,
     POSE_NAMES, POSE_BONES,
+    // 模型的本地化：导入 / 查有没有 / 清掉
+    importModel, hasLocalModel, forgetLocalModel,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
