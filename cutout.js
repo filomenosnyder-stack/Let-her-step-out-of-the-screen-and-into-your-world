@@ -328,17 +328,31 @@
   async function fetchBuf(url, onProgress){
     const r = await fetch(url);
     if (!r.ok) throw new Error(url + ' → HTTP ' + r.status);
-    const total = +r.headers.get('content-length') || 0;
-    if (!r.body || !total) return new Uint8Array(await r.arrayBuffer());
-    const reader = r.body.getReader();
-    const buf = new Uint8Array(total);
+    if (!r.body) return new Uint8Array(await r.arrayBuffer());
+
+    // ★★ content-length 是**传输**长度，不是解压后的长度 —— 绝不能拿它来分配数组。
+    //   GitHub Pages 对 .onnx 发 Content-Encoding: gzip：头部写 27MB，浏览器透明解压
+    //   后实际吐出 44MB。按 27MB 分配再 set 到第 27MB 处就是
+    //     RangeError: offset is out of bounds   at Uint8Array.set   at fetchBuf
+    //   本地 serve.mjs 不压缩、长度正好 → **本地怎么测都是好的**，2026-09-20 上线才炸。
+    //   所以：长度只当进度分母的**估计值**（超过就封顶，别让进度条跑到 100% 以上），
+    //   内存分块收完再拼。
+    const hint = +r.headers.get('content-length') || 0;
+    const chunks = [];
     let got = 0;
+    const reader = r.body.getReader();
     for (;;){
       const { done, value } = await reader.read();
       if (done) break;
-      buf.set(value, got); got += value.length;
-      onProgress && onProgress(got / total);
+      chunks.push(value); got += value.length;
+      if (onProgress) onProgress(hint > 0 ? Math.min(got / hint, 0.99) : 0);
     }
+    // 拼成**长度恰好**的一块。onnxruntime 是直接按 byteLength 解析的，
+    // 多一个字节都算坏文件；单块时也不能直接把 reader 给的 view 交出去。
+    const buf = new Uint8Array(got);
+    let off = 0;
+    for (const c of chunks){ buf.set(c, off); off += c.length; }
+    onProgress && onProgress(1);
     return buf;
   }
 
