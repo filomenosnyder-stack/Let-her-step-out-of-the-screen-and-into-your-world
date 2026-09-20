@@ -276,8 +276,309 @@
     return { canvas: c, rect: { x, y, w, h } };
   }
 
+  // ── 动漫专用抠图：ISNet-anime + onnxruntime-web ──────────────────
+  //
+  // 为什么另起一套：原来那条 AI 抠图用的是 MediaPipe 的 **selfie_segmenter** ——
+  // 那是**给真人自拍**训练的分割模型，拿来抠二次元立绘是错配（描边、发丝、平涂
+  // 色块跟真人的统计特征不是一回事）。这一套用 rembg 生态里的 isnet-anime，
+  // 是**在动漫数据上专门训的**。
+  //
+  // 体积：模型量化后 42MB + 运行时 12MB = 54MB。**只在用户真的点「AI 抠图」时才下**，
+  // 平时走 cutSolidBg（毫秒级、零下载），抠不动才提示走这条。
+  //
+  // ⚠ 模型的输入形状**写死 1024×1024**（试过喂 512，直接报错），所以没法靠降分辨率
+  //   提速。台式 CPU 上 7.2 秒，手机 WASM 单线程会明显更慢 —— 这是目前最大的问题。
+  //   下一步要么上 WebGPU（多下 21MB 运行时，快 5~20 倍），要么换轻量模型。
+  // 抠图模型的落地目录。**相对本脚本自己**解析，不写死 '../anime/'。
+  //
+  // 为什么不能写死：'../anime/' 只在「cutout.js 恰好躺在 URL 根目录下」这一种布局里对
+  // （`..` 到了根就不再往上，于是 '../anime/' 归一成 '/anime/'）。换个布局就全 404：
+  //   · GitHub Pages 项目站  /<仓库名>/cutout.js  → '../anime/' → '/anime/'      ✗ 跳出仓库
+  //   · APK（WebViewAssetLoader） /assets/web/cutout.js → '/assets/anime/'        ✗
+  // 而 anime/ 在**所有**布局里都是 cutout.js 的邻居（arcam/、dist/、dist/docs/、
+  // android …/assets/web/），所以按脚本自己的 URL 解一次，四种布局全对 ——
+  // 打包脚本也就不用再改写这里了（make_dist 只改 index.html 里的 ../）。
+  // ⚠ 这条只在**普通 script** 下成立（cutout.js 就是普通 script）。
+  //   哪天改成 type="module"，document.currentScript 会是 null，直接掉兜底值 → 又 404。
+  const SEG = (function () {
+    try {
+      const s = document.currentScript && document.currentScript.src;
+      if (s) return new URL('./anime/', s).href;
+    } catch (e) {}
+    return './anime/';   // 兜底：按文档相对（等于"站点根就在这一层"那种布局）
+  })();
+  const SEG_SZ = 1024;
+  const SEG_MEAN = [0.485, 0.456, 0.406];
+  const SEG_STD  = [0.229, 0.224, 0.225];
+  let _segSess = null, _segLoading = null;
+
+  function loadScriptOnce(src){
+    return new Promise((res, rej) => {
+      const old = document.querySelector('script[data-arcam="' + src + '"]');
+      if (old) { old.dataset.done ? res() : (old.onload = res, old.onerror = rej); return; }
+      const s = document.createElement('script');
+      s.src = src; s.async = true; s.dataset.arcam = src;
+      s.onload = () => { s.dataset.done = '1'; res(); };
+      s.onerror = () => rej(new Error('加载失败: ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  /** 带进度的取文件。onnxruntime 自己不会报进度，所以模型由我们自己抓成 ArrayBuffer 再喂它 */
+  async function fetchBuf(url, onProgress){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(url + ' → HTTP ' + r.status);
+    const total = +r.headers.get('content-length') || 0;
+    if (!r.body || !total) return new Uint8Array(await r.arrayBuffer());
+    const reader = r.body.getReader();
+    const buf = new Uint8Array(total);
+    let got = 0;
+    for (;;){
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf.set(value, got); got += value.length;
+      onProgress && onProgress(got / total);
+    }
+    return buf;
+  }
+
+  /** 载入运行时 + 模型。幂等，重复调不会载第二遍。 */
+  function loadAnimeSeg(onProgress){
+    if (_segSess) return Promise.resolve(_segSess);
+    if (_segLoading) return _segLoading;
+    _segLoading = (async () => {
+      onProgress && onProgress('载入运行时…', 0);
+      await loadScriptOnce(SEG + 'ort.min.js');
+      const ort = global.ort;
+      if (!ort) throw new Error('onnxruntime 没挂上来');
+      ort.env.wasm.wasmPaths = SEG;      // 末尾斜杠不能少
+      // ⚠ 多线程要 COOP/COEP 跨源隔离头，GitHub Pages 给不了 → 只能单线程
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
+      onProgress && onProgress('下载模型 42MB…', 0);
+      const buf = await fetchBuf(SEG + 'isnet-anime-q8.onnx',
+        f => onProgress && onProgress('下载模型 42MB…', f));
+      onProgress && onProgress('载入模型…', 0);
+      _segSess = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+      return _segSess;
+    })();
+    _segLoading.catch(() => { _segLoading = null; });   // 失败要能重试
+    return _segLoading;
+  }
+
+  /**
+   * 去杂点：只留**最大的一块**连通域，再把里面的小洞补上。
+   *
+   * 为什么需要：模型判的是"哪个像素像主体"，它不管"这块东西连不连成一片"。
+   * 于是海报上的标题、logo、水印、背景碎片 —— 全都会变成蒙版上**孤立的小块**
+   * 跟着留下来（实测：鸣潮那两张海报，前景占到 74~75%，正常立绘只有 20~40%）。
+   * 而角色永远是**最大的一整块**。所以按连通性筛一道，这些碎片自动掉光。
+   *
+   * 两步都是洪水填充，1024×1024 跑下来几十毫秒，可接受：
+   *   ① 标连通域 → 留最大的那个
+   *   ② 从边界往外填背景 → 没被填到的就是角色内部的洞，补上
+   *      （不补的话：闭着的眼睛、衣服上的镂空会变成透明窟窿）
+   *
+   * ⚠ 8 连通（含对角）。用 4 连通的话，斜着的细线（发丝、描边）会被判成两块而丢掉。
+   */
+  function keepLargestBlob(mask, W, H){
+    const N = W * H;
+    const orig = new Uint8Array(mask);         // 留一份软值，最后要还回去（保住边缘过渡带）
+    const on = new Uint8Array(N);
+    for (let i = 0; i < N; i++) on[i] = mask[i] >= 128 ? 1 : 0;
+    const lab = new Int32Array(N);
+    const stack = new Int32Array(N);
+    let best = 0, bestSize = 0, cur = 0;
+    for (let p0 = 0; p0 < N; p0++){
+      if (!on[p0] || lab[p0]) continue;
+      cur++;
+      let sp = 0, size = 0;
+      stack[sp++] = p0; lab[p0] = cur;
+      while (sp > 0){
+        const q = stack[--sp];
+        size++;
+        const x = q % W, y = (q / W) | 0;
+        for (let dy = -1; dy <= 1; dy++){
+          const yy = y + dy; if (yy < 0 || yy >= H) continue;
+          for (let dx = -1; dx <= 1; dx++){
+            if (!dx && !dy) continue;
+            const xx = x + dx; if (xx < 0 || xx >= W) continue;
+            const r = yy * W + xx;
+            if (on[r] && !lab[r]){ lab[r] = cur; stack[sp++] = r; }
+          }
+        }
+      }
+      if (size > bestSize){ bestSize = size; best = cur; }
+    }
+    if (!best) return 0;                       // 一个前景都没有
+    let kept = 0;
+    for (let i = 0; i < N; i++) if (lab[i] === best){ on[i] = 1; kept++; } else on[i] = 0;
+
+    // 补洞：从四条边往里泛洪"外部背景"，泛不到的空隙就是角色内部的洞
+    const out = new Uint8Array(N);
+    let sp = 0;
+    const push = i => { if (!out[i] && !on[i]){ out[i] = 1; stack[sp++] = i; } };
+    for (let x = 0; x < W; x++){ push(x); push((H - 1) * W + x); }
+    for (let y = 1; y < H - 1; y++){ push(y * W); push(y * W + W - 1); }
+    while (sp > 0){
+      const q = stack[--sp];
+      const x = q % W, y = (q / W) | 0;
+      if (x > 0) push(q - 1);
+      if (x < W - 1) push(q + 1);
+      if (y > 0) push(q - W);
+      if (y < H - 1) push(q + W);
+    }
+    for (let i = 0; i < N; i++) if (!on[i] && !out[i]){ on[i] = 1; kept++; }   // 洞补成角色
+    // ⚠ 保下来的像素**用回原来的软值**，不要统统写 255 ——
+    //   写死 255 会把二值化的锯齿边暴露出来（那条窄过渡带就白留了）。
+    for (let i = 0; i < N; i++) mask[i] = on[i] ? orig[i] : 0;
+    return kept;
+  }
+
+  /** 原图 → 1024×1024 NCHW float32，ImageNet 归一化（跟 isnet 官方一致） */
+  // ★★ 等比缩放 + 补边，**绝不拉伸**。
+  //   原来写的是 drawImage(canvas, 0,0, 1024,1024) —— 直接拉成方的。
+  //   一张 1080×1920 的竖图会被**横向压扁 1.78 倍**，等于喂模型一张畸变的图。
+  //   实测（鸣潮那张海报）：
+  //     拉伸     前景 58.3%，最左 22% 列（本该全是背景）被判成前景 **50.2%**
+  //     等比补边  前景 45.7%，同上 **29.9%**  ← 误判接近腰斩
+  //   补边颜色取**归一化后正好等于 0** 的灰：反解 mean*255 = (124,116,104)。
+  //   用 #808080 也能跑，但它归一化后是 0.07 不是 0，模型会把这条边当成"某种东西"。
+  //   顺序：先按长边缩放到 1024 以内，再居中贴到 1024 方图上。
+  //   返回补边参数，后处理要按它把蒙版裁回图片区域。
+  function segPreprocess(canvas, ort){
+    const w = canvas.width, h = canvas.height;
+    const s = SEG_SZ / Math.max(w, h);
+    const nw = Math.max(1, Math.round(w * s)), nh = Math.max(1, Math.round(h * s));
+    const ox = (SEG_SZ - nw) >> 1, oy = (SEG_SZ - nh) >> 1;
+    // 先把图缩好放进一张临时画布 —— 补边时要从"图上"取边，不能从目标画布上取
+    // （把 c 画到 c 自己身上虽然规范里能跑，但不干净，也不利于读懂）
+    const tc = document.createElement('canvas');
+    tc.width = nw; tc.height = nh;
+    const tg = tc.getContext('2d');
+    tg.imageSmoothingQuality = 'high';
+    tg.drawImage(canvas, 0, 0, nw, nh);
+
+    const c = document.createElement('canvas');
+    c.width = c.height = SEG_SZ;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(tc, ox, oy);
+    // ★★ 补边用**边缘延展**（把最外一圈像素往外拉），不要填灰。
+    //   17 张评测集实测「外圈 5% 被判成前景」的中位数：
+    //     拉伸 11.17%   填灰补边 11.17%   **边缘延展 4.01%**
+    //   填灰在图片周围造出一圈人工边界，模型把它当成"某种东西"；
+    //   延展出来的边跟图片自身的背景连成一片，模型自然归进背景。
+    //   ⚠ 这一条是**踩了过拟合才拿到的**：先前我拿**一张**图得出结论说
+    //     "等比补边比拉伸好"。17 张一跑，拉伸和填灰其实是**打平**的，
+    //     真正起作用的是"补什么"而不是"补不补"。
+    const ext = (sx, sy, sw, sh, dx, dy, dw, dh) => {
+      if (dw > 0 && dh > 0) g.drawImage(tc, sx, sy, sw, sh, dx, dy, dw, dh);
+    };
+    ext(0, 0,       nw, 1,  ox, 0,            nw, oy);                    // 上
+    ext(0, nh - 1,  nw, 1,  ox, oy + nh,      nw, SEG_SZ - oy - nh);      // 下
+    ext(0, 0,       1,  nh, 0,  oy,           ox, nh);                    // 左
+    ext(nw - 1, 0,  1,  nh, ox + nw, oy,      SEG_SZ - ox - nw, nh);      // 右
+    // 四个角（从左上/右上/左下/右下角那一个像素拉出去）
+    ext(0, 0,           1, 1, 0,  0,  ox, oy);
+    ext(nw - 1, 0,      1, 1, ox + nw, 0, SEG_SZ - ox - nw, oy);
+    ext(0, nh - 1,      1, 1, 0,  oy + nh, ox, SEG_SZ - oy - nh);
+    ext(nw - 1, nh - 1, 1, 1, ox + nw, oy + nh, SEG_SZ - ox - nw, SEG_SZ - oy - nh);
+    const d = g.getImageData(0, 0, SEG_SZ, SEG_SZ).data;
+    const n = SEG_SZ * SEG_SZ, f = new Float32Array(n * 3);
+    for (let i = 0, p = 0; i < n; i++, p += 4){
+      f[i]         = (d[p]   / 255 - SEG_MEAN[0]) / SEG_STD[0];
+      f[i + n]     = (d[p+1] / 255 - SEG_MEAN[1]) / SEG_STD[1];
+      f[i + 2 * n] = (d[p+2] / 255 - SEG_MEAN[2]) / SEG_STD[2];
+    }
+    return { tensor: new ort.Tensor('float32', f, [1, 3, SEG_SZ, SEG_SZ]), ox, oy, nw, nh };
+  }
+
+  /**
+   * 动漫抠图。返回 { canvas, fg } —— canvas 是**新的**带 alpha 的图，
+   * fg 是前景占比（给调用方判断"是不是压根没认出人"用）。
+   */
+  async function animeCut(canvas, onProgress){
+    const sess = await loadAnimeSeg(onProgress);   // 先确保运行时挂上来
+    const ort = global.ort;
+    onProgress && onProgress('推理中（慢是正常的）…', 1);
+    const t0 = performance.now();
+    const pre = segPreprocess(canvas, ort);
+    const out = await sess.run({ img: pre.tensor });
+    const first = out[Object.keys(out)[0]];
+    const dims = first.dims;                       // [1,1,1024,1024]
+    const MH = dims[dims.length - 2], MW = dims[dims.length - 1];
+    const raw = first.data;
+    // ★ 把蒙版裁回**图片区域**（去掉补边）。
+    //   不裁的话，那条等比缩放留出来的补边会被当成"角色的一部分"一起抠出来 ——
+    //   表现就是抠完四周挂着一圈色块。
+    const W = pre.nw, H = pre.nh;
+    const mask = new Float32Array(W * H);
+    for (let y = 0; y < H; y++){
+      const src = (y + pre.oy) * MW + pre.ox;
+      const dst = y * W;
+      for (let x = 0; x < W; x++) mask[dst + x] = raw[src + x];
+    }
+
+    // 蒙版 → 一张 1024 的灰度图 → 缩回原尺寸 → 当 alpha 用
+    const mc = document.createElement('canvas');
+    mc.width = W; mc.height = H;
+    const mg = mc.getContext('2d');
+    const mi = mg.createImageData(W, H);
+    // ★★ 模型输出的是**软概率图**，不是非 0 即 1 的蒙版。
+    //    直接把概率当 alpha 用，会同时出两个症状、而且看着互相矛盾：
+    //      · 背景上残留的 0.1~0.4 → **看着没去干净**
+    //      · 角色身上落在 0.5 附近的大片 → 半透明，**像被啃掉一块**
+    //    所以要**二值化**，只留很窄一条过渡带消锯齿。
+    //    窄带是抄 aiCut 那条的（那边注释里写了为什么不能用宽斜坡：
+    //    宽斜坡会把大片像素糊成半透明，整张立绘发灰像蒙了层雾）。
+    //    ⚠ 模型换了、量纲不同，这条带的中心值要重新定 —— isnet 的输出
+    //      比 selfie_segmenter 的类别值柔和得多，中心取 0.5 附近。
+    // ⚠ 这两个数是**下界保守 vs 上界保守**的取舍，没有一组对所有图都对：
+    //   下界抬太高（原来 0.42）→ 模型在浅色头发、半透明衣料、跟背景对比低的
+    //     地方输出的概率本来就偏低（0.3~0.4），会被一刀切成背景 → **角色被啃掉一块**
+    //   下界压太低 → 背景上那些 0.2 上下的残留又回来了
+    //   而带子（HI-LO）一宽，边缘就发灰像蒙了层雾（aiCut 那边的注释写过）
+    // 实测原图被啃，所以下界从 0.42 压到 0.28，同时**收窄带子**保住边缘清晰度。
+    const LO = 0.28, HI = 0.46;
+    const abuf = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++){
+      let a = (mask[i] - LO) / (HI - LO);
+      a = a < 0 ? 0 : a > 1 ? 1 : a;
+      abuf[i] = Math.round(a * 255);
+    }
+    // ★ 去杂点：标题、logo、水印、背景碎片在蒙版上都是孤立小块，角色是最大的一块。
+    //   这一步之后那些东西全掉，角色内部的镂空（闭眼、衣料缝隙）会被补上。
+    const fg = keepLargestBlob(abuf, W, H);
+    for (let i = 0; i < W * H; i++){
+      mi.data[i*4] = 255; mi.data[i*4+1] = 255; mi.data[i*4+2] = 255;
+      mi.data[i*4+3] = abuf[i];
+    }
+    mg.putImageData(mi, 0, 0);
+
+    // 蒙版缩回原尺寸。1024→原图是大幅下采样，imageSmoothingQuality 必须 high，
+    // 否则边缘会出现锯齿（这一条在别的缩放路径上已经踩过）。
+    const w = canvas.width, h = canvas.height;
+    const small = document.createElement('canvas');
+    small.width = w; small.height = h;
+    const sg = small.getContext('2d', { willReadFrequently: true });
+    sg.imageSmoothingQuality = 'high';
+    sg.drawImage(mc, 0, 0, w, h);
+    const sm = sg.getImageData(0, 0, w, h).data;
+
+    const o = document.createElement('canvas'); o.width = w; o.height = h;
+    const og = o.getContext('2d', { willReadFrequently: true });
+    og.drawImage(canvas, 0, 0);
+    const src = og.getImageData(0, 0, w, h);
+    // ⚠ sm 本身已经是 .data 了（上面取的时候就已经 .data 过一道），别再点一次 .data
+    for (let i = 0; i < w * h; i++) src.data[i*4+3] = sm[i*4+3];
+    og.putImageData(src, 0, 0);
+
+    return { canvas: o, fg: fg / (W * H), ms: Math.round(performance.now() - t0) };
+  }
+
   global.ARCAM_CUT = {
     cutSolidBg, loadVision, aiCut, detectPose, drawPose,
+    loadAnimeSeg, animeCut,
     contentBounds, cropToCanvas,
     POSE_NAMES, POSE_BONES,
   };

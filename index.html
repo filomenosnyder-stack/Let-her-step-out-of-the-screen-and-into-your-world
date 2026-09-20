@@ -92,6 +92,19 @@
                   display:flex; flex-direction:column; background:#141b22;
                   border:1px solid #313d47; border-radius:9px; color:#9aa7b2; }
   #chRow button.on { border-color:#3f9fd0; box-shadow:inset 0 0 0 1px #3f9fd0; color:#fff; }
+  /* 替用户展开折叠区之后，得指出该点哪一格，不然展开了还是找不到 */
+  @keyframes attnPulse { 0%,100% { box-shadow:inset 0 0 0 1px #3f9fd0; } 50% { box-shadow:inset 0 0 0 2px #7fd4ff, 0 0 10px #3f9fd088; } }
+  button.attn { border-color:#7fd4ff !important; color:#fff !important; animation:attnPulse 0.9s ease-in-out 3; }
+  /* AI 抠图进度条。条纹跑动只是"还在算"的提示，不代表真实百分比 ——
+     模型的层数是固定的，中途取不到进度。别把它做成假的百分比，
+     那种「37% 卡住十分钟」比不显示更让人抓狂。 */
+  #aiProg { margin-top:8px; }
+  #aiProg .aiTrack { height:6px; border-radius:3px; background:#1b242c; overflow:hidden; }
+  #aiProg .aiStripe { height:100%; width:38%; border-radius:3px;
+                      background:linear-gradient(90deg,#2b5f7d,#5fd0ff,#2b5f7d); }
+  #aiProg.run .aiStripe { animation:aiRun 1.1s linear infinite; }
+  @keyframes aiRun { from { transform:translateX(-100%); } to { transform:translateX(265%); } }
+  #aiProg span { display:block; margin-top:5px; font-size:12px; color:#9aa7b2; }
   #chRow button img { width:100%; flex:1 1 auto; min-height:56px; object-fit:cover;
                       display:block; background:#0b0e11; }
   #chRow button span { flex:0 0 auto; font-size:9.5px; padding:1px 2px; max-width:100%;
@@ -221,11 +234,19 @@
     <div id="editBox" hidden>
       <div class="btns">
         <button id="cutSolid" data-t="btn.cutSolid">纯色底抠图</button>
+        <button id="cutAi" data-t="btn.cutAi">AI 抠图</button>
         <button id="trimBtn" data-t="btn.trim">自动裁边</button>
         <button id="chReset" data-t="btn.reset">还原</button>
       </div>
     </div>
     <div id="chNote" style="display:none;margin-top:6px;font-size:12px;color:#9aa7b2;line-height:1.7"></div>
+    <!-- AI 抠图进度。推理是 WASM 在主线程上跑的，**主线程被占住时这条也不会动** ——
+         它不是"假装在动"，是真的把状态和已用秒数摆出来：卡住的时候至少你知道它在算，
+         而不是"点下去没反应"。真要让它流畅动起来，得把推理挪进 Web Worker。 -->
+    <div id="aiProg" hidden>
+      <div class="aiTrack"><div class="aiStripe" id="aiStripe"></div></div>
+      <span id="aiTxt"></span>
+    </div>
 
     <!-- ── ② 摆位：先"站在地上还是飘在画面里"，再"这张图从哪切"，
            最后才是相机那几个数（收起来，它是细调不是第一步）──────── -->
@@ -273,6 +294,14 @@
       <button id="tBody" class="on" data-t="btn.body">人体</button>
       <button id="tLight" class="on" data-t="btn.light">光线匹配</button>
       <button id="tGrain" class="on" data-t="btn.grain">颗粒匹配</button>
+      <button id="tShd" class="on" data-t="btn.shadow">接触阴影</button>
+    </div>
+    <!-- 自动摆正。基准是**常驻二选一**（倾角每帧重算，一次性写死会被传感器覆盖回去）；
+         摆正按钮是**一次性**的，按一下把横向吸到最近的三分线。 -->
+    <div class="btns">
+      <button id="rotWorld" class="on" data-t="btn.rotWorld">对正世界</button>
+      <button id="rotFrame" data-t="btn.rotFrame">对正画面</button>
+      <button id="autoFix" data-t="btn.autoFix">自动摆正</button>
     </div>
     <div class="btns">
       <button id="exPack" data-t="btn.export">导出素材包</button>
@@ -293,15 +322,26 @@
        「大小」那一格在自由/贴地两种模式下绑的是**不同的量**（见 syncLive），
        标签也跟着换 key，所以它显示的是**当前**那个量的名字。 -->
   <div id="live">
-    <!-- 移动格：只在贴边时出现 —— 吸附住之后沿那条边滑。
-         为什么不用"拖画面"：手指得一直按着、还挡住你看它滑到哪了，
-         一条常驻滑块能边看边调。贴下/贴上时是左右，贴左/贴右时是上下。 -->
+    <!-- 移动：**两个**滑条（左右 / 上下），自由模式下常驻。
+         ★ 原来只有一条，而且**只在贴边时出现**（沿贴住的那条边滑）。
+           问题是：不贴边就没有任何滑条可调，只能靠手指拖画面 ——
+           手指得一直按着、还挡住你看它挪到哪了，实测被骂"半身拖不动"。
+           现在两个轴各一条，永远都在，直接写 freeP，不依赖任何吸附状态。
+         ⚠ 滑条动了**不调 resnap()** —— 调了的话，贴着边的那一轴会被吸附立刻拉回去，
+           滑条看着就是"拉不动"。用户要的是"我自己调"，那就不该被吸附抢走。 -->
     <div class="lvCell" id="lvMvCell" style="display:none">
       <div class="lvTop">
         <label id="lvMvLab" for="lvMv" data-t="live.moveX" data-t-title="live.moveTip">左右移</label>
         <output id="olvMv">50%</output>
       </div>
       <input type="range" id="lvMv" min="0" max="100" step="0.5" value="50">
+    </div>
+    <div class="lvCell" id="lvMvYCell" style="display:none">
+      <div class="lvTop">
+        <label id="lvMvYLab" for="lvMvY" data-t="live.moveY" data-t-title="live.moveYTip">上下移</label>
+        <output id="olvMvY">50%</output>
+      </div>
+      <input type="range" id="lvMvY" min="0" max="100" step="0.5" value="50">
     </div>
     <div class="lvCell">
       <div class="lvTop">
@@ -360,7 +400,7 @@
        公告要是塞进同一个节点，一报错就跟着没了。 -->
   <div id="gateNote">
     <b data-t="gate.noteT">新功能测试中</b>
-    <span data-t="gate.noteB">刚加了「颗粒匹配」：让立绘的质感和手机拍出来的画面对齐。默认开着，「取景」那一排可以点开关对比。还在调，有问题欢迎反馈。</span>
+    <span data-t="gate.noteB">这版加了「接触阴影」和「构图提示」：立绘会在脚下投一道影子，颜色跟着环境光走；拍之前会提醒地平线歪没歪、人有没有出画。半身多了上下 / 左右两个滑条，AI 抠图也上了（复杂背景能抠，第一次要点时间下模型）。都在「取景」那一排，点开关能对比。还在调，有问题欢迎反馈。</span>
   </div>
   <div id="gateMsg" data-t="gate.msg">需要授权摄像头和动作传感器</div>
   <button id="gateBtn" data-t="gate.start">开始</button>
@@ -374,6 +414,36 @@
 <script>
 'use strict';
 const D2R = Math.PI/180, R2D = 180/Math.PI;
+
+/**
+ * 安卓壳里的自动记录钩子。
+ * ★★ 公开站点上 `window.ArcLog` **根本不存在**，所以这里必须是彻底的空操作 ——
+ *    任何情况下都不能因为记录器不在而把页面搞挂。整段包在 try 里，连 JSON 序列化
+ *    炸了都不许往外冒。
+ * 壳那边落盘在 /sdcard/Android/data/com.arcam.viewfinder/files/arcam_logs/
+ */
+function arcLog(name, data){
+  try {
+    if (window.ArcLog && window.ArcLog.event) window.ArcLog.event(name, JSON.stringify(data || {}));
+  } catch (e) {}
+}
+
+/** 当前全量状态。拍照和改参数时随手记一份，回家能还原当时的每一个数。 */
+function arcSnapshot(){
+  const c = currentPlacement();
+  return {
+    pitch: +S.pitch.toFixed(2), roll: +S.roll.toFixed(2),
+    h: S.h, d: S.d, x: S.x, feq: S.feq,
+    mode: S.mode, shot: S.shot, frame: S.frame, charScale: S.charScale,
+    Hp: S.Hp, edgeBar: S.edgeBar,
+    light: { lum:+LIGHT.lum.toFixed(3), r:+LIGHT.r.toFixed(3), b:+LIGHT.b.toFixed(3), sat:+LIGHT.sat.toFixed(3), ok: LIGHT.ok },
+    on: { light: LIGHT_ON, grain: LIGHT_GRN, shadow: LIGHT_SHD, soften: LIGHT_SFT },
+    place: c ? { u:+c.u.toFixed(1), v:+c.v.toFixed(1), w:+c.w.toFixed(1), h:+c.h.toFixed(1), rot:+c.rot.toFixed(3) } : null,
+    canvas: { w: cv.width, h: cv.height },
+    orient: (screen.orientation ? screen.orientation.angle : null),
+    vw: innerWidth, vh: innerHeight,
+  };
+}
 
 // ── 真机上报（临时调试用）—— 已摘 ─────────────────────────────────
 // 页面上原来有个 probe()：转屏 / 改窗口时把 win/roll/ang/框/摆位用 <img> 打到
@@ -474,6 +544,10 @@ const TXT = {
   'btn.grid':     ['地面网格', 'Ground grid'],
   'btn.light':    ['光线匹配', 'Light match'],
   'btn.grain':    ['颗粒匹配', 'Grain match'],
+  'btn.shadow':   ['接触阴影', 'Contact shadow'],
+  'btn.rotWorld': ['对正世界', 'Align to world'],
+  'btn.rotFrame': ['对正画面', 'Align to frame'],
+  'btn.autoFix':  ['自动摆正', 'Auto-frame'],
   'btn.body':     ['人体', 'Figure'],
   'btn.shot':     ['拍照', 'Shoot'],
   // 快门只出照片；三个文件的包挪到这个按钮里，点了才打 zip
@@ -492,6 +566,7 @@ const TXT = {
                    'The aspect decides the crop; grid and figure are guides only'],
   'ch.pick':      ['选本地图片', 'Local image'],
   'btn.cutSolid': ['纯色底抠图', 'Cut solid bg'],
+  'btn.cutAi':    ['AI 抠图', 'AI cutout'],
   'btn.trim':     ['自动裁边', 'Auto-trim'],
   'btn.reset':    ['还原', 'Reset'],
   'mode.ground':  ['贴地', 'On ground'],
@@ -541,8 +616,10 @@ const TXT = {
   // 贴边之后的"沿边移动"：贴下/贴上时是左右，贴左/贴右时是上下
   'live.moveX':   ['左右移', 'Move X'],
   'live.moveY':   ['上下移', 'Move Y'],
-  'live.moveTip': ['沿取景框那条边滑动（拖动只挪位置，不改大小）',
-                   'Slide along that frame edge (position only, size unchanged)'],
+  // ⚠ 文案跟着行为走：以前这两条是"沿贴住的那条边滑"，现在两个轴各一条、
+  //   跟贴边无关了。留着旧说法用户会去找那条边。
+  'live.moveTip':  ['左右挪位置（只挪位置，不改大小）', 'Move left/right (position only)'],
+  'live.moveYTip': ['上下挪位置（只挪位置，不改大小）', 'Move up/down (position only)'],
   'live.size':    ['大小', 'Size'],
   'live.scale':   ['大小', 'Size'],
   'live.sizeTip': ['自由模式：立绘占画面高的百分比（拖动只改大小，不挪位置）',
@@ -563,6 +640,14 @@ const TXT = {
   'note.chFail':  ['这张图读不出来', 'Could not read that image'],
   'note.chNone':  ['先在上面选一张立绘', 'Pick a character above first'],
   'note.cutSolid':['抠掉 {0}% 的底色', 'Removed {0}% background'],
+  // AI 抠图那条路：首次要下 54MB，所以进度必须分阶段报出来，不然看着就是卡死
+  'note.aiStage': ['AI 抠图：{0}', 'AI cutout: {0}'],
+  'note.aiElapsed':['已用 {0} 秒', '{0}s elapsed'],
+  'note.aiPrep':  ['准备中…', 'Preparing…'],
+  'note.aiProg':  ['AI 抠图：{0} {1}%', 'AI cutout: {0} {1}%'],
+  'note.aiDone':  ['AI 抠图完成，前景 {0}%，用了 {1} 秒', 'AI cutout done — {0}% subject in {1}s'],
+  'note.aiNothing':['AI 没认出前景（可能不是立绘，或者图太小）', 'AI found no subject'],
+  'note.aiFail':  ['AI 抠图失败：{0}', 'AI cutout failed: {0}'],
   // ⚠ 别再叫人「去用 AI 抠图」：AI 抠图是 PC 融图台那条路，这一版根本不发它
   //   （vision/ 那 18MB 整个不进包）。提示指向一个页面上不存在的功能，等于把人晾在那儿 ——
   //   和之前那句「去装 adb」是同一类错：文案还停留在旧版的功能集上。
@@ -589,8 +674,10 @@ const TXT = {
                    + '(free + snap bottom). You can change it later under Placement'],
   'kind.doneFull':['全身：脚踩地面 —— 已设为「贴地」+ 景别全身，之后在「摆位」里还能改',
                    'Full body: feet on the ground — set to On ground with the Full body shot; changeable under Placement'],
-  'kind.doneHalf':['半身：切口贴下边 —— 已设为「自由」+ 贴下 + 占画面高 60%，之后在「摆位」里还能改',
-                   'Half body: cut edge on the bottom — set to Free + Snap bottom + 60% frame height; changeable under Placement'],
+  // ⚠ 文案必须跟着行为走。原来这句写的是"切口贴下边"，但半身**已经不再自动贴边**了 ——
+  //   留着就是骗人（用户按回执去找贴边效果，找不到）。
+  'kind.doneHalf':['半身：已设为「自由」+ 占画面高 60%，位置随便拖 —— 想贴边在「贴边」里自己点',
+                   'Half body: Free + 60% frame height. Drag it anywhere; use Snap if you want an edge'],
 
   // 画面上的拖动提示（几秒后自己淡出，不是控件）。
   // studio.html 里有一行「画面上拖动挪立绘」，手机页一直没搬过来 ——
@@ -620,8 +707,8 @@ const TXT = {
 
   // 闸门 / 报错
   'gate.noteT':   ['新功能测试中', 'New feature in testing'],
-  'gate.noteB':   ['刚加了「颗粒匹配」：让立绘的质感和手机拍出来的画面对齐。默认开着，「取景」那一排可以点开关对比。还在调，有问题欢迎反馈。',
-                   'Just added "Grain match": it aligns the cutout\'s texture with your phone photo. On by default — toggle it in the Framing row to compare. Still tuning; feedback welcome.'],
+  'gate.noteB':   ['这版加了「接触阴影」和「构图提示」：立绘会在脚下投一道影子，颜色跟着环境光走；拍之前会提醒地平线歪没歪、人有没有出画。半身多了上下 / 左右两个滑条，AI 抠图也上了（复杂背景能抠，第一次要点时间下模型）。都在「取景」那一排，点开关能对比。还在调，有问题欢迎反馈。',
+                   'This build adds "Contact shadow" and "Framing hints": the cutout now casts a shadow at its feet, tinted by the ambient light, and you get a heads-up when the horizon is off or the character leaves the frame. Half-body also gets up/down and left/right sliders, and AI cutout is in (it handles busy backgrounds; the model downloads on first use, so expect a wait). All in the Framing row — toggle to compare. Still tuning; feedback welcome.'],
   'gate.msg':     ['需要授权摄像头和动作传感器', 'Camera and motion sensor access required'],
   'gate.start':   ['开始', 'Start'],
   'gate.opening': ['正在打开摄像头和传感器…', 'Opening camera and sensors…'],
@@ -709,6 +796,7 @@ const S = { h:1.6, Hp:1.65, d:4.0, x:0, feq:23, pitch:0, roll:0,
             mode:'ground', sizePct:60,
             // 景别：这张立绘从人身上哪一段切的。老存档没有这一项 ——
             // groundPlacement 读不到就当'全身'（= 老行为，下沿踩地），不会摆歪。
+            rotBasis:'world',   // 立绘对正基准：'world' 跟世界竖直 / 'frame' 永远画面竖直
             shot:'全身',
             // 纯大小系数：只乘在"这个人站在那儿该有多大"那个跨度上，**位置一点不动**。
             // 老存档没有这一项 → 读不到就是 1，和老行为逐像素等价。
@@ -782,12 +870,33 @@ function viewRect(){
  *   自由画幅：不额外裁，直接就是看得见的那块（宽高比 = 屏幕）
  *   其余画幅：在看得见的那块里取该宽高比的最大内接矩形，居中
  */
+/**
+ * **贴边吸附**用的矩形 = 取景框 ∩ 看得见的那块。
+ *
+ * 为什么不能直接用 frameRect()：满幅那一档的框是**整块画布**，它的下边压在
+ * 底部按钮条底下。半身立绘贴下时切口会吸到那儿 —— 人整个躲进 UI 后面，
+ * 你既看不见也没法对位。实测就是这么被骂的。
+ *
+ * ⚠ 出图**不用**这个，出图仍然裁 frameRect（满幅=整块画布）——
+ *   照片里该有的边就得有，不能因为"屏幕上被 UI 挡住了"就少裁一块。
+ *   两者分开之后：吸附永远吸在看得见的地方，出图该多大还多大。
+ */
+function snapRect(){
+  const R = frameRect(), V = viewRect();
+  const x0 = Math.max(R.x, V.x), y0 = Math.max(R.y, V.y);
+  const x1 = Math.min(R.x + R.w, V.x + V.w), y1 = Math.min(R.y + R.h, V.y + V.h);
+  if (!(x1 - x0 > 8) || !(y1 - y0 > 8)) return R;   // 交不出来就退回原框，别返回空矩形
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 function frameRect(){
   // 满幅：整块画布，**不**先缩进可见区。
   // 这一条是给「拍全身」用的 —— 别的画幅都只能长在看得见的那块里，
   // 横屏时那块很扁（手机没开自动旋转、软转屏之后看得见的就是一条竖长条，
   // 开了自动旋转则是一条横扁条），出图照着框一裁更扁，人整个塞不进去。
-  // 代价：框边会伸到屏幕外，贴边吸附吸到那些边就看不见 —— 用满幅就别指望吸附。
+  // 代价：框边会伸到屏幕外 —— **出图**裁到框外没问题（那是照片的一部分），
+  // 但**贴边吸附**不能吸到那些边（吸了就看不见人在哪）。
+  // 所以吸附另走 snapRect()（= 这份框 ∩ 看得见的那块），出图仍然用这份。
   if (FRAMES[S.frame] === -1) return { x:0, y:0, w:cv.width, h:cv.height };
   const V = viewRect();
   const ar = FRAMES[S.frame] || 0;
@@ -821,8 +930,20 @@ function project(x, y, d) {
 // 后摄光轴 = 设备 -z；画面上的"上" = 设备 +y。
 // 俯角 = 光轴低于水平面的角度；滚转 = 像平面相对水平线的倾角。
 // ⚠ 这套符号约定只能靠真机确认，第一次用的时候看网格有没有歪向对的一侧。
+// 页面自己算出来的姿态，按 ~5Hz 记一份。
+// ★ 为什么明知道原生那边已经在 20Hz 记原始传感器了还要再记一份：
+//   两边**对不上**的时候，才能一眼看出是"传感器给的不对"还是"页面这套换算错了"。
+//   只记一边的话，回家只能看到一个数，没法判谁错。
+let arcOrientTick = 0;
 function onOrient(e) {
   if (e.alpha == null || e.beta == null || e.gamma == null) return;
+  if ((arcOrientTick++ % 4) === 0){
+    arcLog('orient', { pitch:+S.pitch.toFixed(2), roll:+S.roll.toFixed(2),
+                       alpha:+e.alpha.toFixed(2), beta:+e.beta.toFixed(2), gamma:+e.gamma.toFixed(2),
+                       abs: e.absolute,
+                       scr: (screen.orientation ? screen.orientation.angle : null),
+                       turn: (typeof TURN !== 'undefined' ? TURN : null) });
+  }
   if (e.absolute === false) { /* 相对朝向也能用：我们只取重力相关的分量 */ }
   const a = e.alpha*D2R, b = e.beta*D2R, g = e.gamma*D2R;
   const cA=Math.cos(a), sA=Math.sin(a), cB=Math.cos(b), sB=Math.sin(b), cG=Math.cos(g), sG=Math.sin(g);
@@ -1226,6 +1347,32 @@ $('tGrain').addEventListener('click', e => {
   e.target.classList.toggle('on', LIGHT_GRN);
   draw();
 });
+// 接触阴影。⚠ 它**不受**「光线匹配」总开关管 —— 阴影不走 bakeLit（那是烘立绘自己的），
+// 它是画在地上的另一层。所以总开关关掉时阴影还在，这是有意的：
+// 那个总开关的语义是"这张立绘原样贴上去"，而阴影不是立绘的一部分。
+// ── 自动摆正 ────────────────────────────────────────────────────
+// 基准是**常驻二选一**：倾角每帧重算，一次性写死会被下一帧传感器数据覆盖回去。
+// 摆正按钮是**一次性**的：按一下把横向吸到最近的三分线（见 autoFix）。
+function syncRotRow(){
+  $('rotWorld').classList.toggle('on', S.rotBasis !== 'frame');
+  $('rotFrame').classList.toggle('on', S.rotBasis === 'frame');
+}
+$('rotWorld').onclick = () => { S.rotBasis = 'world'; syncRotRow(); draw(); };
+$('rotFrame').onclick = () => { S.rotBasis = 'frame'; syncRotRow(); draw(); };
+$('autoFix').onclick  = () => {
+  const r = autoFix();
+  const msg = r === 'already' ? t('fix.already')
+            : r === 'nochar'  ? t('fix.nochar')
+            : t('fix.done', r.slice(6));
+  saveNote(msg, null);
+};
+syncRotRow();
+
+$('tShd').addEventListener('click', e => {
+  LIGHT_SHD = !LIGHT_SHD; footSig = null;
+  e.target.classList.toggle('on', LIGHT_SHD);
+  draw();
+});
 
 function draw() {
   if (!S.ready) return;
@@ -1378,6 +1525,85 @@ function drawFigure() {
   ctx.restore();
 }
 
+/**
+ * 构图体检：**这组参数拍出来会不对**的时候出声。
+ * 从安卓版（MainActivity.kt 的 compositionHints()，11 条）原样搬过来的 ——
+ * 判据和阈值一个字没改，只把变量名换成本页的（两边的量几乎同名，连 SHOTS 那五个
+ * 覆盖值都是逐字一致的）。
+ *
+ * ⚠ 跟原版的一处**故意不同**：原版只在碰控件时才算（onSensorChanged 里不调它），
+ *   所以单纯转手机，提示文字是**滞后**的 —— 得再碰一下别的控件才更新。
+ *   这里挂在每帧的 hud() 里，转手机立刻跟着变。原版那个是遗漏，不是设计。
+ *
+ * ⚠ 全部并列，无优先级、无分级 —— 一次可能同时冒好几条，这是原版的行为。
+ */
+function compositionHints(){
+  const out = [];
+  const W = cv.width, H = cv.height;
+  if (W < 8 || H < 8) return out;
+  const f = focal();
+  // 地平线的像素高度。俯角向下为正，所以压得越低头抬得越高，地平线往上跑
+  const hv = H/2 - f * Math.tan(S.pitch * D2R);
+  const hr = hv / H;
+
+  // ── 角度本身 ──
+  if (hr >= 0.42 && hr <= 0.58) out.push('地平线在正中，抬一点或压一点');
+  if (S.pitch > 40)  out.push('俯角 ' + S.pitch.toFixed(0) + '°，人物会被压扁');
+  if (S.pitch < -35) out.push('仰角偏大，人物会被拉长');
+
+  // ── 立绘在画面里的位置 / 大小 ──
+  const c = currentPlacement();
+  if (c && c.w > 0){
+    // ── 出画 ──
+    // 立绘是**世界锚定**的（跟「人体」骨架同一套投影），所以俯仰一大，人跟着
+    // 骨架一起飞出画面。那是对的 —— 镜头抬 40°，4 米外地面上那点离轴 61°，
+    // 本来就不在视野里。但用户看不见人只会觉得"上下拍坏了"，必须给一句话。
+    // ⚠ 判据是**整块立绘都在画外**。中心出画但半个身子还在画面里是常见构图
+    //   （半身大头照就是这样），报它等于天天误报。
+    // ⚠ 出画时下面那几条（三分线 / 顶满 / 偏小 / 接地）全是拿着画外的坐标算的，
+    //   一定要跳过 —— 不然会一边说"人出画了"一边说"角色挪到三分线上更稳"。
+    const hw = c.w/2, hh = c.h/2;
+    if (c.u + hw < 0 || c.u - hw > W || c.v + hh < 0 || c.v - hh > H){
+      out.push('人物出画了 —— 抬/压一点镜头，或把距离调远');
+      return out;
+    }
+    const xr = c.u / W;
+    const near = Math.min(Math.abs(xr - 1/3), Math.abs(xr - 2/3), Math.abs(xr - 0.5));
+    if (near > 0.11) out.push('角色挪到三分线上更稳');
+    const fill = c.h / H;
+    if (fill > 0.92) out.push('角色快顶满画面');
+    if (fill < 0.10) out.push('角色偏小');
+
+    // ── 接地 ──
+    // 要景别够全（原版门限 shotCover ≥ 0.95 = 全身）——
+    // 半身景别下"脚"根本不在画面里，拿它判接地是没意义的。
+    const cover = SHOTS[S.shot] || 1;
+    if (cover >= 0.95 && S.mode === 'ground'){
+      const cutV = c.v + c.h/2;
+      if (cutV < hv - H*0.03) out.push('脚在地平线以上，浮空了');
+    }
+  }
+  return out;
+}
+
+// ── 删掉的三条（反解身高 ×2 / 眼高差 ×2），2026-09-20 ─────────────────
+// 安卓原版有，我原样搬了过来，实测**它们什么都没测**：
+//
+//   groundPlacement:  c.h = span × charScale        （span = 一个 S.Hp 高的人的投影）
+//   impliedHeight:    hp  = c.h × zc / (focal·cos p)
+//   把第一式代入第二式 →  hp ≈ S.Hp × charScale     ← zc / focal / cos p 全约掉
+//
+// 也就是说"反解出 3.7 米高"**只是在把大小滑块读回给用户听**，跟场景、
+// 距离、相机高度一点关系都没有。实测现象完全对得上：
+//   · 因为**拉远**而变小的立绘从不报错（charScale 没动，hp 恒等于 1.65）
+//   · 手动放大到"看着正常"的立绘反而报"太大了"（报的是"你动过滑块"）
+// 它假设用户要往场景里放一个**真人尺寸**的物体 —— 可这一页干的是
+// "把立绘拍进照片"，大小是**构图选择**，不是物理约束。前提不成立，改阈值救不回来。
+//
+// 下游那两条眼高差（相机比人物眼高/低 X 米）吃同一个 hp，是同一个假数的回声，
+// 一并删。顺带：原版 `diff < -0.55`（相机在眼睛**下方**）那条文案写的是
+// 「比人物眼**高**」——方向词本来就是反的，搬过来也是反的。删了就没了。
+
 function hud() {
   const a = project(S.x, -S.h, S.d), b = project(S.x, S.Hp - S.h, S.d);
   const px = (a && b) ? Math.abs(a.v - b.v) : 0;
@@ -1387,6 +1613,8 @@ function hud() {
     t('hud.line2', cv.width, cv.height, focal().toFixed(0)) + '<br>' +
     (a && b ? t('hud.person', (px/cv.height*100).toFixed(1)) :
               `<span class="warn">${t('hud.behind')}</span>`);
+  const hz = compositionHints();
+  if (hz.length) $('hud').innerHTML += `<br><span class="warn">⚠ ${hz.join('　·　')}</span>`;
   $('frameRead').textContent = t('read.frame', Math.round(R.w), Math.round(R.h));
 }
 
@@ -1447,25 +1675,25 @@ function syncLive(){
     const s = S.feq.toFixed(0) + 'mm';
     if (ofe.textContent !== s) ofe.textContent = s;
   }
-  // 「移动」这一格：只在贴边时出现。滑块映射到**真实可滑范围**，
-  // 所以滑到 0 就是真到头，不是半路被夹住（图比框大时尤其明显）。
-  const mvCell = $('lvMvCell'), mv = $('lvMv'), omv = $('olvMv'), mlab = $('lvMvLab');
-  if (mvCell && mv && omv && mlab){
-    const tr = edgeTravel();
-    const on = !!tr;
-    if ((mvCell.style.display !== 'none') !== on) mvCell.style.display = on ? '' : 'none';
-    if (tr){
-      const c = currentPlacement();
-      const pos = c ? (tr.horiz ? c.u : c.v) : tr.lo;
-      const t01 = tr.hi > tr.lo ? (pos - tr.lo) / (tr.hi - tr.lo) : 0.5;
-      const pct = Math.max(0, Math.min(1, t01)) * 100;
-      if (!nearStep(mv, pct, 0.5)) mv.value = pct;
-      const s = pct.toFixed(0) + '%';
-      if (omv.textContent !== s) omv.textContent = s;
-      const tk = tr.horiz ? 'live.moveX' : 'live.moveY';
-      if (mlab.dataset.t !== tk){ mlab.dataset.t = tk; mlab.textContent = t(tk); }
-      if (mlab.dataset.tTitle !== 'live.moveTip'){ mlab.dataset.tTitle = 'live.moveTip'; mlab.title = t('live.moveTip'); }
-    }
+  // 「左右移」「上下移」：自由模式下**两条都常驻**，直接映射 freeP.u / freeP.v。
+  // ★ 不再跟贴边绑定。原来只有一条、而且只在贴边时冒出来 —— 不贴边就一条滑条都没有，
+  //   只能靠手指拖画面（手指得一直按着，还挡住视线）。实测被骂"半身拖不动"。
+  //   贴边现在只是"一键摆到框边"，摆完之后照样可以用这两条微调。
+  const isFree = S.mode === 'free';
+  // ⚠ 第三列是**屏幕轴**（'x'/'y'），不是 freeP 的分量 —— 横屏时两者是互换的，
+  //   直接拿 freeP.u 显示会让滑块位置跟立绘实际位置对不上。
+  for (const [cid, rid, oid, ax] of [
+    ['lvMvCell',  'lvMv',  'olvMv',  'x'],
+    ['lvMvYCell', 'lvMvY', 'olvMvY', 'y'],
+  ]){
+    const cell = $(cid), el = $(rid), out = $(oid);
+    if (!cell || !el || !out) continue;
+    if ((cell.style.display !== 'none') !== isFree) cell.style.display = isFree ? '' : 'none';
+    if (!isFree) continue;
+    const pct = clampN(freeToScreenAxis(ax, freeP), 0, 1) * 100;
+    if (!nearStep(el, pct, 0.5)) el.value = pct;
+    const s = pct.toFixed(0) + '%';
+    if (out.textContent !== s) out.textContent = s;
   }
 }
 
@@ -1479,7 +1707,9 @@ function syncLive(){
 function edgeTravel(){
   const p = typeof currentPlacement === 'function' ? currentPlacement() : null;
   if (!p || !S.edgeBar) return null;
-  const R = frameRect();
+  // ⚠ 跟吸附用同一个矩形（snapRect），不能用 frameRect ——
+  //   两处不一致的话，"移动"滑块的行程会跟人实际吸到的位置对不上。
+  const R = snapRect();
   // 几何走同一个 edgeGeom —— 不再自己算一遍外接盒、也不再自己判轴。
   // （自己判轴就是之前横屏那个 bug：按基准边判成"左右移"，而实际吸的是左边、该上下移。）
   const G = edgeGeom(S.edgeBar, charAspect(), p.h, charRot());
@@ -1491,17 +1721,53 @@ function edgeTravel(){
 // 常驻条的「移动」：只在贴边时出现，沿贴住的那条边滑。
 // 用户原话："移了好多下才能移动一点点" —— 问题出在拖画面，所以改走滑块：
 // 手指不用一直按着、也不挡视线，还能一眼看出滑到哪了。
+// 两个移动滑条。⚠ 位置存在 freeP 里（归一化），不是 currentPlacement() 返回的
+// 那个临时对象 —— 往临时对象上写等于没写（这个坑之前踩过）。
+// ⚠ **不调 resnap()**：调了的话，贴着边的那一轴会被吸附立刻拉回去，滑条看着就是"拉不动"。
+//   用户要的是"我自己调"，那就不该让吸附抢走。要重新贴边就按「贴边」那排按钮。
+/**
+ * 滑条量的是**屏幕**的左右/上下，但 freeP 存的是**画布**坐标。
+ * ★★ 软件转屏（|TURN| = 90）时画布相对屏幕转了 90°，两者**不是一回事**：
+ *    你眼里的"左右"其实是画布的 y 轴。不换算的话，横屏下"左右移"会把立绘上下挪 ——
+ *    实测被报"上下和左右搞反了"。（上一版删掉了旧的判轴逻辑，没把这层补回来。）
+ *
+ * 画布 → 屏幕的旋转是 −TURN，于是：
+ *   TURN > 0：画布 +y = 屏幕右，画布 +x = 屏幕上
+ *   TURN < 0：画布 +y = 屏幕左，画布 +x = 屏幕下
+ * 所以屏幕左右 → 画布 y（同向或反向），屏幕上下 → 画布 x（反向或同向）。
+ * 返回 {u,v} 里**只有一个**分量被赋值，另一个原样不动。
+ */
+function screenAxisToFree(screenAxis, t, cur){
+  const s = TURN > 0 ? 1 : TURN < 0 ? -1 : 0;
+  // ⚠ 这里不能绑在 screenAxis 上写死 —— 三档转屏时坐标轴会整体互换，
+  //   由 s 决定换不换、往哪边换。
+  return s === 0
+    ? (screenAxis === 'x' ? { u: t,          v: cur.v } : { u: cur.u, v: t })
+    : (screenAxis === 'x' ? { u: cur.u, v: s > 0 ? t : 1 - t }
+                          : { u: s > 0 ? 1 - t : t, v: cur.v });
+}
+/** 反过来：由当前 freeP 算出某个**屏幕轴**上滑块该显示多少（0~1） */
+function freeToScreenAxis(screenAxis, cur){
+  const s = TURN > 0 ? 1 : TURN < 0 ? -1 : 0;
+  return s === 0
+    ? (screenAxis === 'x' ? cur.u : cur.v)
+    : (screenAxis === 'x' ? (s > 0 ? cur.v : 1 - cur.v)
+                          : (s > 0 ? 1 - cur.u : cur.u));
+}
+
 $('lvMv').addEventListener('input', () => {
-  const tr = edgeTravel();
-  if (!tr || S.mode !== 'free') return;
-  const t = parseFloat($('lvMv').value) / 100;
-  const pos = tr.lo + (tr.hi - tr.lo) * t;
-  // ⚠ 位置存在 freeP 里（归一化），不是 currentPlacement() 返回的那个临时对象 ——
-  //   往临时对象上写等于没写。写完必须 resnap() 让它走一遍吸附。
-  if (tr.horiz) freeP.u = pos / cv.width;
-  else          freeP.v = pos / cv.height;
-  resnap();
-  draw();
+  if (S.mode !== 'free') return;
+  const t = clampN(parseFloat($('lvMv').value) / 100, 0, 1);
+  const r = screenAxisToFree('x', t, freeP);       // 屏幕「左右」
+  freeP.u = r.u; freeP.v = r.v;
+  draw(); syncLive();
+});
+$('lvMvY').addEventListener('input', () => {
+  if (S.mode !== 'free') return;
+  const t = clampN(parseFloat($('lvMvY').value) / 100, 0, 1);
+  const r = screenAxisToFree('y', t, freeP);       // 屏幕「上下」
+  freeP.u = r.u; freeP.v = r.v;
+  draw(); syncLive();
 });
 
 // 常驻条的「大小」：自由模式写 S.sizePct（纯大小，不挪位置），
@@ -1614,7 +1880,9 @@ function setEdgeBar(bar){
   // ⚠ 先按"旧条"算完位置，**再**切模式 —— 切模式会走 syncModeRow → resnap()，
   //   那一下是按**新**条吸的，抢在前面就把"沿边滑到哪儿"这个比例洗掉了。
   if (chCanvas && bar){
-    const R = frameRect();
+    // 跟 resnap/edgeTravel 用同一个矩形（snapRect）—— 三处必须一致，
+    // 不一致的话"切到哪条边"和"实际吸到哪"会对不上。
+    const R = snapRect();
     const cur = freeRaw();
     const r = (old ? slideRatio(cur, old, R) : null)
            ?? slideRatio(cur, bar, R) ?? 0.5;
@@ -1652,8 +1920,24 @@ function bindFold(btnId, boxId, caretId){
   };
   b.onclick = () => set(box.hidden);
   set(false);
+  return set;                     // 返回 setter，别处要程序化展开时用得上
 }
 bindFold('foldEdit', 'editBox', 'caretEdit');
+// 留一个"程序化展开修饰立绘"的口子。
+// ★ 为什么要它：整条修图线（纯色底 / AI 抠图 / 裁边）全在这个折叠后面，
+//   而**加载时不自动抠图**（cutSolidBg 只在按钮 onclick 里调）——
+//   于是用户不主动展开就永远看不见它。实测被骂"藏得太深"。
+//   正确做法不是挪按钮，是**在该用的时候自己冒出来**：选了本地图就展开。
+const openEditFold = (function(){
+  const b = $('foldEdit'), box = $('editBox'), car = $('caretEdit');
+  return () => {
+    if (!b || !box || !box.hidden) return;
+    box.hidden = false;
+    b.classList.add('on');
+    b.setAttribute('aria-expanded', 'true');
+    if (car) car.textContent = '▾';
+  };
+})();
 bindFold('foldCam',  'camBox',  'caretCam');
 
 $('tGrid').addEventListener('click', e => { S.grid = !S.grid; e.target.classList.toggle('on', S.grid); draw(); });
@@ -1731,6 +2015,13 @@ function loadChar(url, name, idx){
   img.onload = () => {
     setCharset(img);
     chNote(t('note.chLoaded', name, img.naturalWidth, img.naturalHeight) + '<br>' + t('note.chHint'));
+    // 自己带图进来的（idx = -1）多半背景不干净 —— 把「修饰立绘」替他展开，
+    // 顺手把 AI 抠图那一格标出来。素材库那几张是已经处理好的，不打扰。
+    if (idx === -1){
+      openEditFold();
+      const ai = $('cutAi');
+      if (ai){ ai.classList.add('attn'); setTimeout(() => ai.classList.remove('attn'), 2600); }
+    }
     draw();
     // 选择器还开着就先不弹（两张卡片会叠在同一处）—— 等选完那一句里再弹
     if (!kindEl || kindEl.hidden) showTip();
@@ -1811,11 +2102,18 @@ function applyCharKind(kind){
   const half = kind === 'half';
   if (half){
     S.mode = 'free';        // 切口压在框边上，不是踩地
-    S.edgeBar = 2;          // 贴下 ← 半身立绘的切口就压在这一条上
+    // ★ 半身**默认不贴边**，位置全归用户。
+    //
+    //   原来这里是 S.edgeBar = 2（贴下），想法是"切口精确压在框下边，出图时
+    //   躯干不会被切掉一截悬空的"。但实测下来这个"贴心"是负分：
+    //     · 一贴死，上下就调不动了 —— 而"贴下 + 上下移"本来就自相矛盾
+    //       （移上去就不再贴着下边了），想微调只能先解除
+    //     · 满幅那一档框下边还在屏幕外，吸过去人直接躲进 UI 后面
+    //   用户的原话是「解除，让人自己调整吧」。贴边这个能力**没删**，
+    //   在「贴边」那一排随时可以手动贴，只是不再替他做决定。
+    S.edgeBar = 0;
     S.sizePct = 60;         // 一个合理的初始大小，之后拖「大小」随便改
-    // ⚠ 半身必须配「自由」：它的语义是"切口压在**框的下边**"，那条边得看得见。
-    //   配满幅的话框下边 = 画布下边，在屏幕外（竖屏下比可见区低 159px）——
-    //   切口直接沉到看不见的地方，看着就像没摆。
+    // 仍然配「自由」：满幅的框下边在屏幕外，位置不好对。
     S.frame = '自由';
   } else {
     S.mode = 'ground';      // 脚踩地面
@@ -1885,6 +2183,63 @@ $('cutSolid').onclick = () => {
   chCanvas = copyOf(c); draw();
   chNote(t('note.cutSolid', (r*100).toFixed(0)));
 };
+/**
+ * AI 抠图（动漫专用）。
+ *
+ * 跟「纯色底抠图」是**两条完全不同的路**：
+ *   纯色底 —— 零下载、几毫秒，但只认平涂底
+ *   AI     —— **首次要下 54MB**（模型 42 + 运行时 12），推理还要十几秒到几十秒
+ * 所以默认不碰它，只有纯色底啃不动（复杂背景）时才值得。
+ *
+ * ⚠ 未量化/量化格式不对的模型在浏览器里**根本建不了会话**（ConvInteger 算子
+ *   WASM 没实现），而那个错在 Python 里验不出来 —— 见 anime/ 那套的来历。
+ * ⚠ 下载中途别让用户以为卡死了：54MB 在移动网络上要一会儿，进度得报出来。
+ */
+$('cutAi').onclick = async () => {
+  if (!chBase) return chNote(t('note.chNone'));
+  if (!CUT || !CUT.animeCut) return chNote(t('note.chFail'));
+  if ($('cutAi').dataset.busy) return;              // 防连点：一次只能跑一个
+  $('cutAi').dataset.busy = '1';
+  const t0 = Date.now();
+  const prog = $('aiProg'), ptxt = $('aiTxt');
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
+  // ⚠ 只显示"在做什么 + 已经多久"，**不显示百分比**。
+  //   模型的层数是固定的，中途拿不到真进度；编一个百分比出来
+  //   （"37% 卡了十分钟"）比不显示更让人抓狂。
+  let lastStage = '', lastF = null;
+  const paint = () => {
+    if (!ptxt) return;
+    ptxt.textContent = (lastF != null
+        ? t('note.aiProg', lastStage, Math.round(lastF * 100))
+        : t('note.aiStage', lastStage)) + '　' + t('note.aiElapsed', secs());
+  };
+  let tick = null;
+  try {
+    if (prog){ prog.hidden = false; prog.classList.add('run'); }
+    lastStage = t('note.aiPrep'); paint();
+    tick = setInterval(paint, 500);      // 主线程被推理占住时这个也不会跳 —— 见上面注释
+    const c = copyOf(chBase);
+    const r = await CUT.animeCut(c, (stage, f) => { lastStage = stage; lastF = f; paint(); });
+    if (!r || !r.canvas) throw new Error('没有输出');
+    if (r.fg < 0.02) throw new Error(t('note.aiNothing'));
+    chBase = r.canvas;                  // 抠完的结果成为新的基准（裁边接着从它来）
+    chCanvas = copyOf(r.canvas); draw();
+    // ⚠ 百分比要 toFixed —— 直接塞原始浮点会打印成 39.660072326660156%
+    chNote(t('note.aiDone', (r.fg * 100).toFixed(1), ((Date.now() - t0) / 1000).toFixed(1)));
+  } catch (e) {
+    chNote(t('note.aiFail', String((e && e.message) || e)));
+  } finally {
+    // ★ finally 里必须把进度条收掉、把 busy 放开 ——
+    //   "抠完之后有概率 UI 点不了"十有八九就是中途抛错导致这两样没还原，
+    //   留下一个盖在面板上的东西 + 永远 busy 的按钮。
+    if (tick) clearInterval(tick);
+    if (prog){ prog.hidden = true; prog.classList.remove('run'); }
+    if (ptxt) ptxt.textContent = '';
+    delete $('cutAi').dataset.busy;
+    try { draw(); syncLive(); } catch (e2) {}   // 把画布和滑条拉回一致状态
+  }
+};
+
 /** 自动裁边：贴边靠的是整张图的边界，四周那圈透明边距不裁掉，贴的就不是人 */
 $('trimBtn').onclick = () => {
   if (!chBase) return chNote(t('note.chNone'));
@@ -1921,9 +2276,22 @@ function groundPlacement(){
   if (!chCanvas) return null;
   const k = SHOTS[S.shot] || SHOTS['全身'];    // 老存档没 shot → 当全身
   const yb = (1 - k) * S.Hp;                   // 下沿离地多高
+  // ★★ 这里**必须**跟 drawFigure()（「人体」那套骨架）用同一套投影，两边一起动。
+  //
+  //   2026-09-20 修：上一版把 pitch 临时归零，想让立绘"钉在画面上"不受俯仰影响。
+  //   结果变成两套投影各投各的 —— pitch=0 时逐像素重合（所以当时看不出来），
+  //   一俯一仰立刻分家：pitch=+20 立绘比骨架浮空 468px、−30 插进地里 1091px
+  //   （画布才 1920 高）。用户原话：「立绘不像之前那么贴近骨架了，他俩有空间了」。
+  //   进度量：node _probe_gap.mjs（pitch=0 那行应为 偏移 0 / 高之比 1.000）
+  //
+  //   骨架是拿真实 pitch 投的（drawFigure 里的 P() 直接调 project），立绘只能跟着，
+  //   否则"人物站在你选的那块地面上"这件事就是假的。俯仰大了立绘会跟着骨架一起
+  //   出画 —— 那本来就是对的：镜头抬 40°，4 米外地面上那点离轴 21°+40°=61°，
+  //   手机主摄半视场才 25° 上下，它确实已经不在视野里。要拦就拦在构图提示里
+  //   （俯角 >40° / 仰角 <−35° 各有一条告警），不要在这里偷偷把人物挪回来。
   const pb = project(S.x, yb - S.h, S.d);      // 下沿那个点
   const pt = project(S.x, S.Hp - S.h, S.d);    // 头顶那个点（不随景别变）
-  if (!pb || !pt) return null;
+  if (!pb || !pt) return null;                 // 翻到相机背后了 → 不画
   const span = Math.hypot(pb.u-pt.u, pb.v-pt.v);   // 这个人站在那儿"本来"该多大
   if (span < 2) return null;
   const h = span * S.charScale;                // ← 纯大小系数乘在这儿
@@ -1938,7 +2306,8 @@ function groundPlacement(){
     // 手机横过来（roll≠0）时地面铅垂线在画面里是斜的，立绘得跟着斜。
     // 局部 -y 要对上 pb→pt：θ = atan2(ux, -uy)，即 atan2(dx, dy) 的补角。
     // 这样反推回去，下沿正好落在 pb、上沿正好落在 pb 沿方向推 h 的地方。
-    rot: Math.atan2(ux, -uy),
+    // 对正画面时不跟世界斜，直接归零；对正世界才用脚底→头顶那条线
+    rot: S.rotBasis === 'frame' ? 0 : Math.atan2(ux, -uy),
   };
 }
 
@@ -2021,7 +2390,16 @@ const charAspect = () => chCanvas ? chCanvas.width/chCanvas.height : 1;
  *   正确做法不是"锁住立绘"，而是**让吸附跟着旋转走** ——
  *   见 rotateBar()：立绘转过去之后，切口朝哪条边就吸哪条边。
  */
-const charRot = () => S.roll*D2R;
+/**
+ * 立绘的倾角。**两种对正基准**：
+ *   'world'（默认）—— 跟着世界竖直走。手机滚转，画面里的地面就斜，立绘跟着斜。
+ *                     物理正确：真实的人被你歪着拍，照片里就是歪的；脚永远踩实。
+ *   'frame'        —— 永远在画面里竖直，像贴纸。手机怎么歪它都不歪，构图永远好看。
+ *
+ * ⚠ 为什么这是个**常驻开关**而不是"按一下转正"：这个值每一帧都从 S.roll 重算，
+ *   一次性写死会被下一帧的传感器数据覆盖回去。要"永远正"就得有粘性，粘性就是开关。
+ */
+const charRot = () => (S.rotBasis === 'frame' ? 0 : S.roll*D2R);
 
 /**
  * 把基准边按旋转量转过去 —— 切口朝向变了，要吸的边也得换。
@@ -2052,7 +2430,7 @@ function resnap(){
   //   把调用方刚写进去的值**原地覆盖**：滑条拉到底，freeP 被改成"没转过的"那个位置，
   //   最后 freePlacement() 再按 rot=90 吸附回同一点 → 立绘纹丝不动，只有滑条在动。
   //   （用户原话："他就是在那个滑条动"；竖屏 rot=0 时两条路径恰好一致，所以竖屏是好的。）
-  const s = snapToEdge(freeRaw(), S.edgeBar, frameRect(), charAspect(), charRot());
+  const s = snapToEdge(freeRaw(), S.edgeBar, snapRect(), charAspect(), charRot());
   freeP.u = s.u/cv.width; freeP.v = s.v/cv.height;
 }
 
@@ -2065,7 +2443,7 @@ function freePlacement(){
   if (!chCanvas) return null;
   const c = freeRaw();
   // 把当前的旋转量一起传进去 —— 立绘转到哪，切口就朝哪条边
-  const s = S.edgeBar ? snapToEdge(c, S.edgeBar, frameRect(), charAspect(), charRot()) : c;
+  const s = S.edgeBar ? snapToEdge(c, S.edgeBar, snapRect(), charAspect(), charRot()) : c;
   return {
     u: s.u, v: s.v, h: s.h,
     w: s.h * charAspect(),
@@ -2073,6 +2451,168 @@ function freePlacement(){
   };
 }
 function currentPlacement(){ return S.mode === 'free' ? freePlacement() : groundPlacement(); }
+
+/**
+ * 自动摆正：把立绘**横向**吸到最近的三分线（1/3、1/2、2/3 三选一）。
+ *
+ * ★ 只动横向。别的**一个都不碰**，理由各不相同：
+ *   · 纵向 / 大小 / 接地点 —— 贴地模式下这些是投影算出来的，动了就不接地了
+ *   · 大小 —— 它是构图选择，相机没资格替用户决定
+ *   · 倾角 —— 由「对正基准」常驻开关管（见 charRot 那段），不是一次性的
+ *
+ * ⚠ 三分线取 1/3、1/2、2/3 三个候选而不是只有两个 —— 跟构图提示那条判据同一套
+ *   （那边的 near 也是在 1/3、2/3、0.5 里取最小）。两边必须一致，
+ *   否则会出现"自动摆正之后提示还在说不在三分线上"这种自打脸。
+ */
+function autoFix(){
+  const c0 = currentPlacement();
+  // ★ 返回值是**给人看的结果**，不是布尔。原来返回 false 就静默退出，
+  //   用户分不清"已经正了"还是"按钮坏了" —— 实测最常见的情况恰恰是前者：
+  //   立绘默认就在正中间 50%，而 50% 是三个候选之一，于是按了永远没反应。
+  if (!c0 || !cv.width) return 'nochar';
+  const W = cv.width, xr = c0.u / W;
+  const best = [1/3, 0.5, 2/3].reduce((a, b) => Math.abs(xr - b) < Math.abs(xr - a) ? b : a);
+  const targetU = best * W;
+  if (Math.abs(c0.u - targetU) < 1) return 'already';  // 已经压在线上，别抖
+
+  if (S.mode === 'free'){
+    // 自由模式的位置就是 freeP（归一化），不是在 currentPlacement() 返回的临时对象上改
+    freeP.u = clampN(targetU / W, 0, 1);
+    resnap();                                          // 改完走一遍贴边吸附
+  } else {
+    // 贴地模式位置由 S.x 决定，而 project() 是非线性的 —— 取个数值导数再一步解到位。
+    // （不能用"u 和 x 成比例"硬算，pitch 一大比例就变了。）
+    const keep = S.x;
+    S.x = keep + 0.05;
+    const c1 = currentPlacement();
+    S.x = keep;
+    if (!c1) return 'nochar';
+    const grad = (c1.u - c0.u) / 0.05;
+    if (!isFinite(grad) || Math.abs(grad) < 1e-6) return 'nochar';
+    S.x = clampN(keep - (c0.u - targetU) / grad, -20, 20);
+  }
+  draw();
+  if (typeof syncSizeSliders === 'function') syncSizeSliders();   // 滑条读数跟着走
+  return 'moved:' + Math.round(best*100);
+}
+
+// ── 接触阴影 ────────────────────────────────────────────────────────
+// 旧版（studio.html:781）是个**椭圆径向渐变**，烂在四点：
+//   ① 形状跟人物无关 —— 脚一迈开、裙子一飘，影子还是那个椭圆
+//   ② 从中心均匀往外衰减 —— 真实接触阴影是"贴着接触处最实、离开就迅速变虚"
+//   ③ 「光从哪边来」要手拖滑块 —— 那个滑块本身就证明方向是猜的
+//   ④ 纯黑 rgba(0,0,0) —— 阴影是"环境光被挡住的那块"，不是刷一层黑
+// 这一版对上面四条各改一条：
+//   ① 形状取**立绘自己底部那一带的 alpha**（逐列取最大值 = 落地轮廓），
+//      两只脚 / 长裙摆自动带进去，不用任何人工形状
+//   ② 纵向是**高斯带**，峰值压在接触线上，往两边快速淡出
+//   ③ 只做**接触阴影**，不做投射阴影。接触阴影不需要光的方向 —— 它就是环境光
+//      在接触处被挡住，所以"方向估不准"这个问题在这里根本不存在。
+//      投射阴影依然是禁的：室内顶灯+窗+墙反光混在一起，方向本来就估不出来。
+//   ④ 颜色 = **环境色**的暗化版（阴影里没有直射光，只剩漫射，所以更暗也更淡）
+//
+// ⚠ 只在**贴地模式**画。自由模式是"把立绘摆到画面上某个位置"，我们不知道地面在哪，
+//   凭空补一个影子就是猜 —— 跟旧版那个滑块一个性质。
+const SH_BAND   = 0.085;   // 取立绘底部 8.5% 当"落地轮廓"
+const SH_THICK  = 0.24;    // 阴影厚度 ÷ 立绘宽（地面被斜着看，压得很扁）
+const SH_ALPHA  = 0.42;    // 最深处浓度
+const SH_DARK   = 0.55;    // 阴影亮度 = 环境亮度 × 这个系数
+const SH_PEAK   = 0.30;    // 纵向峰值位置（0 = 上边缘，1 = 下边缘）
+const SH_SPREAD = 0.26;    // 纵向高斯宽度
+let LIGHT_SHD = true;
+
+// 落地轮廓缓存。只跟立绘本身 + 阴影颜色有关 —— 换立绘或颜色明显变了才重算。
+// 不缓存的话每帧要读一遍底部那一条的 alpha，几十万像素，白白吃掉帧率。
+let footCv = null, footFor = null, footSig = null;
+
+function footPrint(colR, colG, colB){
+  const sig = colR + ',' + colG + ',' + colB;
+  if (footFor === chCanvas && footCv && footSig === sig) return footCv;
+  footFor = chCanvas; footSig = sig; footCv = null;
+  const ch = chCanvas;
+  if (!ch || !ch.width) return null;
+  const w = ch.width, h = ch.height;
+  const outH = Math.max(4, Math.round(w * SH_THICK));
+  if (w < 12 || h < 12) return null;
+
+  const bandH = Math.max(2, Math.round(h * SH_BAND));
+  const bc = document.createElement('canvas'); bc.width = w; bc.height = bandH;
+  const bg = bc.getContext('2d', { willReadFrequently: true });
+  bg.drawImage(ch, 0, h - bandH, w, bandH, 0, 0, w, bandH);
+  let d;
+  try { d = bg.getImageData(0, 0, w, bandH).data; } catch (e) { return null; }
+  // 逐列取 alpha 最大值：那一列"有没有踩在地上、踩得多实"
+  const prof = new Float32Array(w);
+  for (let x = 0; x < w; x++){
+    let m = 0;
+    for (let y = 0; y < bandH; y++){
+      const a = d[(y*w + x)*4 + 3];
+      if (a > m) m = a;
+    }
+    prof[x] = m / 255;
+  }
+  // 横向抹一下。不抹的话影子边缘就是脚本身的硬轮廓，比立绘还清楚，一眼假。
+  const r = Math.max(1, Math.round(w * 0.02));
+  const sm = new Float32Array(w);
+  for (let x = 0; x < w; x++){
+    let s = 0, n = 0;
+    for (let k = -r; k <= r; k++){
+      const xx = x + k;
+      if (xx < 0 || xx >= w) continue;
+      s += prof[xx]; n++;
+    }
+    sm[x] = s / n;
+  }
+  const oc = document.createElement('canvas'); oc.width = w; oc.height = outH;
+  const og = oc.getContext('2d');
+  const img = og.createImageData(w, outH), o = img.data;
+  const den = 2 * SH_SPREAD * SH_SPREAD;
+  for (let y = 0; y < outH; y++){
+    const t = (y + 0.5) / outH;
+    const dy = t - SH_PEAK;
+    const fall = Math.exp(-(dy*dy) / den);
+    if (fall < 0.004) continue;
+    for (let x = 0; x < w; x++){
+      const a = sm[x] * fall * SH_ALPHA;
+      if (a <= 0.002) continue;
+      const i = (y*w + x) * 4;
+      o[i] = colR; o[i+1] = colG; o[i+2] = colB; o[i+3] = Math.round(a * 255);
+    }
+  }
+  og.putImageData(img, 0, 0);
+  footCv = oc;
+  return footCv;
+}
+
+function drawContactShadow(g, c){
+  if (!LIGHT_SHD) return;
+  if (S.mode !== 'ground') return;      // 不知道地面在哪就不画（见上面 ⚠）
+  if (c.w < 14) return;
+  // ★★ 为什么不用 multiply（试过了，在这个架构上根本行不通）：
+  //   cv 是一张**透明浮层**，摄像头画面在它下面的 <video> 元素里，draw() 从不把视频
+  //   画进画布。而 canvas 的 multiply 在**透明底**上会退化成 source-over
+  //   （混合公式里 αb=0 时 Cr = Cs，没有东西可乘）。实测：5 张立绘 × 4 个场景，
+  //   全部变成"把地面提亮 8~33 级"。要让 multiply 有用就得把视频先画进 cv，
+  //   那等于把"两个图层各管一摊"的架构推翻，不值得。
+  //
+  //   所以还是盖一层，但颜色必须**从环境算出来**，不能是固定灰 ——
+  //   地面一旦比那层灰还暗，固定灰就会把地面提亮（夜街、暗车库必踩）。
+  //   阴影 = 那块地面自己的颜色 × SH_DARK：亮地板压成暗地板，暗地板压得更暗，
+  //   而且跟着环境偏色走（阴影里没有直射光只剩漫射，所以用暖冷比的**平方根**
+  //   只施加一半，比被照到的那块淡）。
+  //   ⚠ 这是"用**平均**地面色代替**局部**地面色"，局部比平均暗很多的地方仍会略微提亮 ——
+  //     已经比固定灰好得多，但做不到像素级正确，这是不推翻架构的代价。
+  const lumS = clampN(LIGHT.lum, 0.04, 1) * SH_DARK;
+  const rb = LIGHT.ok ? Math.sqrt(Math.max(0.05, LIGHT.r) / Math.max(0.05, LIGHT.b)) : 1;
+  const q = (v) => Math.round(clampN(v, 0, 1) * 255 / 6) * 6;    // 量化，免得每帧重算
+  const colR = q(lumS * rb), colG = q(lumS), colB = q(lumS / rb);
+  const fp = footPrint(colR, colG, colB);
+  if (!fp) return;
+  const sw = c.w, shh = c.w * SH_THICK;
+  // 峰值那条线压在"立绘下沿"上 —— 那就是脚踩地面的地方
+  const top = c.h/2 - shh * SH_PEAK;
+  g.drawImage(fp, -sw/2, top, sw, shh);
+}
 
 /** 把立绘画到任意一块 context 上。取景器和出图走**同一条**，位置才分毫不差 */
 function drawCharTo(g){
@@ -2083,6 +2623,15 @@ function drawCharTo(g){
   g.rotate(c.rot);
   // ⚠ 必须在 litChar() 之前填 —— 颗粒的缩放补偿要靠它（见 bakeLit）
   litScale = chCanvas.width ? c.w / chCanvas.width : 1;
+  // ★ 缩画质量。canvas 默认是 'low' —— 立绘从 1500px 缩到几百 px 时，
+  //   'low' 会**丢采样**而不是平均，出来一圈锯齿和噪点，看着就是"越小越糊"。
+  //   实测关掉颗粒时横向相邻差：画成 66px 时 15.8、394px 时 5.5 —— 越小的反而越高，
+  //   正经的缩小应该是越缩越低。这一行两个路径都吃得到（预览和出图共用 drawCharTo）。
+  //   颗粒**不是**元凶（各档贡献 0.51/0.67/0.88/0.57，缩放补偿是对的）。
+  g.imageSmoothingQuality = 'high';
+  // 阴影是**场景**的一部分，不是立绘的一部分 —— 必须在立绘之前铺下去。
+  // （studio 上一版就栽在这：预览画了、导出漏了，合成图比眼睛看到的少一层接地感。）
+  drawContactShadow(g, c);
   // 用烘好的"匹配过光线"的那版；没开光线匹配时 litChar() 直接返回原图
   g.drawImage(litChar(), -c.w/2, -c.h/2, c.w, c.h);
   g.restore();
@@ -2317,7 +2866,38 @@ function saveNote(msg, imgUrl){
 const SAVED = { share:'note.savedShare', picker:'note.savedPicker',
                 download:'note.savedDownload', cancel:'note.savedCancel' };
 /** 存一个文件：分享 → 选目录 → a[download] 三档 */
+/** blob → base64（不含 data: 前缀）。只在安卓壳那条路上用得到。 */
+function blobToB64(blob){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result); res(s.slice(s.indexOf(',') + 1)); };
+    r.onerror = () => rej(r.error || new Error('read fail'));
+    r.readAsDataURL(blob);
+  });
+}
+
 async function saveBlob(blob, filename){
+  // ★★ 安卓壳里走这座桥。WebView 里下面三条路**全废**：
+  //   navigator.share     —— WebView 不实现
+  //   showSaveFilePicker  —— WebView 不实现
+  //   <a download> + click —— 要 setDownloadListener，而且 blob: 的 URL
+  //                           原生那头根本取不到内容
+  //   三条都静默失败 → 用户看到的就是"按拍照没反应"。
+  //   所以桥放最前面：blob 转 base64 分片递过去，由原生写进文件。
+  //   ⚠ 分片是因为一张 1920×1080 的 JPEG 转出来 base64 近 3MB，
+  //     一次过 JS 桥容易在低端机上炸或者被截断。
+  try {
+    if (window.ArcLog && window.ArcLog.saveChunk && window.ArcLog.saveEnd){
+      const b64 = await blobToB64(blob);
+      const CH = 256 * 1024;
+      for (let i = 0; i < b64.length; i += CH) window.ArcLog.saveChunk(filename, b64.slice(i, i + CH));
+      const p = window.ArcLog.saveEnd(filename);
+      arcLog('saved', { name: filename, bytes: blob.size, path: p || null });
+      if (p) return 'download';
+    }
+  } catch (e){ arcLog('save_fail', { name: filename, err: String(e && e.message || e) }); }
+
+  // 下面这三条是浏览器里的正路，一个字没动
   let file = null;
   try { file = new File([blob], filename, { type: blob.type || 'application/octet-stream' }); } catch (e) {}
   if (file && navigator.canShare && navigator.canShare({ files: [file] })){
@@ -2523,6 +3103,8 @@ $('exPack').addEventListener('click', async () => {
     if (chCanvas && currentPlacement()) charCv = buildCharCanvas().canvas;
   } catch (e){ saveNote(t('note.shotFail'), null); return; }
   const scene = buildScene(R, currentPlacement());
+  // 记录：这一枪按下时的全量状态。安卓壳里才有 ArcLog，浏览器里是空操作。
+  arcLog('shot', arcSnapshot());
 
   // ⚠ 三个文件共用**同一个** stamp（同一个时刻取的），少一个字符解压出来就对不上号
   const stamp = newStamp();
@@ -2637,12 +3219,19 @@ async function start() {
     if (v.videoWidth) fit();
 
     $('gate').style.display = 'none';
+    arcLog('cam_ok', arcSnapshot());      // 安卓壳里才落盘，浏览器里是空操作
   } catch (err) {
     // 三种失败分开报（见 gate.fail* 那几条注释）
     $('gateMsg').innerHTML =
         !window.isSecureContext          ? t('gate.failInsecure')
       : err && err.name === 'NotAllowedError' ? t('gate.failDenied')
       :                                  t('gate.fail', err.name || '?', err.message || '');
+    // 失败也要记 —— "为什么我在xx手机上打不开"全靠这一条
+    arcLog('cam_fail', {
+      name: err && err.name, msg: err && err.message,
+      secure: window.isSecureContext, ua: navigator.userAgent,
+      hasMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    });
   }
 }
 $('gateBtn').addEventListener('click', start);
