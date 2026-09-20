@@ -416,7 +416,7 @@
        公告要是塞进同一个节点，一报错就跟着没了。 -->
   <div id="gateNote">
     <b data-t="gate.noteT">新功能测试中</b>
-    <span data-t="gate.noteB">这版加了「接触阴影」和「构图提示」：立绘会在脚下投一道影子，颜色跟着环境光走；拍之前会提醒地平线歪没歪、人有没有出画。半身多了上下 / 左右两个滑条，AI 抠图也上了（复杂背景能抠，第一次要点时间下模型）。都在「取景」那一排，点开关能对比。还在调，有问题欢迎反馈。</span>
+    <span data-t="gate.noteB">AI 抠图的模型放在 QQ 群 1121979160 的群文件里 —— 国内从本站下只有 80KB/s，从群里下快得多。下好之后到「修饰立绘」里点「导入模型」选它，以后不用再下。</span>
   </div>
   <div id="gateMsg" data-t="gate.msg">需要授权摄像头和动作传感器</div>
   <button id="gateBtn" data-t="gate.start">开始</button>
@@ -738,8 +738,10 @@ const TXT = {
 
   // 闸门 / 报错
   'gate.noteT':   ['新功能测试中', 'New feature in testing'],
-  'gate.noteB':   ['这版加了「接触阴影」和「构图提示」：立绘会在脚下投一道影子，颜色跟着环境光走；拍之前会提醒地平线歪没歪、人有没有出画。半身多了上下 / 左右两个滑条，AI 抠图也上了（复杂背景能抠，第一次要点时间下模型）。都在「取景」那一排，点开关能对比。还在调，有问题欢迎反馈。',
-                   'This build adds "Contact shadow" and "Framing hints": the cutout now casts a shadow at its feet, tinted by the ambient light, and you get a heads-up when the horizon is off or the character leaves the frame. Half-body also gets up/down and left/right sliders, and AI cutout is in (it handles busy backgrounds; the model downloads on first use, so expect a wait). All in the Framing row — toggle to compare. Still tuning; feedback welcome.'],
+  // ⚠ 公告里必须带 QQ 群号。站内下载国内只有 80KB/s，从群里拿是**绝大多数人**
+  //   唯一走通的路径 —— 藏在「修饰立绘」面板里没人会翻到。
+  'gate.noteB':   ['AI 抠图的模型放在 QQ 群 1121979160 的群文件里 —— 国内从本站下只有 80KB/s，从群里下快得多。下好之后到「修饰立绘」里点「导入模型」选它，以后不用再下。',
+                   'The AI cutout model is in the file section of QQ group 1121979160 — this site only serves ~80KB/s from mainland China, the group is far faster. Download it, then tap "Import model" under "Edit character" and pick the file. No more downloads after that.'],
   'gate.msg':     ['需要授权摄像头和动作传感器', 'Camera and motion sensor access required'],
   'gate.start':   ['开始', 'Start'],
   'gate.opening': ['正在打开摄像头和传感器…', 'Opening camera and sensors…'],
