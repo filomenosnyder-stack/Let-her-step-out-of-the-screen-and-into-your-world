@@ -8,6 +8,10 @@ window.ARCAM_CHARS = {
       "file": "chars/立绘/00_半身1.jpg"
     },
     {
+      "name": "秋水汐_全身",
+      "file": "chars/立绘/秋水汐_全身.png"
+    },
+    {
       "name": "全身1",
       "file": "chars/立绘/全身1.jpg"
     },
