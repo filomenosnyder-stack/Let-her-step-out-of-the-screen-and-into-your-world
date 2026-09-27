@@ -746,10 +746,90 @@
     return { canvas: o, fg: fg / (W * H), ms: Math.round(performance.now() - t0) };
   }
 
+  /**
+   * 软边整理：**先把那圈残留收掉，再把边做软**（erode → feather），只动 alpha。
+   *
+   * 为什么需要（自测 + 外部意见指向同一件事）：
+   *   纯色底泛洪最后是"二值化 + 3×3 均值"，边上只有一圈 1px 的过渡；
+   *   而泛洪够不到的那 1px 往往还挂着**半透明底色**（亮底抠出来就是一圈发白描边）。
+   *   结果两个症状同时存在：边太硬（照片里没有刀口级的边）+ 一圈镶边。
+   *   `erode` 先把轮廓往里收 N 像素（把那圈残留一起收掉），`feather` 再在收过的轮廓上
+   *   做 3×3 均值放出一圈柔边。**离轮廓 2px 以上的内部 alpha 一个字节都不动**（测试钉着）。
+   *
+   * ⚠ 只动 alpha、不碰 RGB：所以不会把立绘内部糊掉，也不会出黑边
+   *   （半透明像素带的是立绘自己的颜色，叠上去是正经的 alpha 混合）。
+   *   两步都写成**可分离**（先横向后纵向），3 抽头，手机端也跑得动。
+   *
+   * @param canvas 就地修改
+   * @param o { erode=1, feather=2 }  单位像素；0 = 跳过那一步
+   * @returns { changed, opaqueBefore, opaqueAfter, softBefore, softAfter }
+   */
+  function softenEdge(canvas, o) {
+    o = o || {};
+    const er = Math.max(0, Math.round(o.erode == null ? 1 : o.erode));
+    const fe = Math.max(0, Math.round(o.feather == null ? 2 : o.feather));
+    const w = canvas.width, h = canvas.height;
+    if (!w || !h) return { changed: 0, opaqueBefore: 0, opaqueAfter: 0, softBefore: 0, softAfter: 0 };
+    const g = canvas.getContext('2d', { willReadFrequently: true });
+    const im = g.getImageData(0, 0, w, h);
+    const px = im.data, n = w * h;
+    // ⚠ 三个缓冲，不是两个：`orig` 只读（写回时要拿它比"变了没有"），另外两个乒乓。
+    //   用两个的话，erode 的第二遍就会把 orig 覆盖掉（乒乓一圈回到起点），
+    //   于是 `v !== orig[i]` 永远为假 —— 函数**静默什么都不做**（测试第一次就抓到了）。
+    const orig = new Uint8Array(n), b1 = new Uint8Array(n), b2 = new Uint8Array(n);
+    let opaqueBefore = 0, softBefore = 0;
+    for (let i = 0; i < n; i++) {
+      const a = px[i * 4 + 3];
+      orig[i] = a;
+      if (a >= 250) opaqueBefore++;
+      else if (a > 8) softBefore++;
+    }
+    b1.set(orig);
+    let src = b1, dst = b2, tmp;
+    // erode：横向一遍 + 纵向一遍取 min
+    for (let pass = 0; pass < (er ? 2 : 0); pass++) {
+      const horiz = pass === 0;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let m = 255;
+        for (let k = -er; k <= er; k++) {
+          const xx = horiz ? x + k : x, yy = horiz ? y : y + k;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;   // 画布外当"没有"（不压暗边界）
+          const v = src[yy * w + xx];
+          if (v < m) m = v;
+        }
+        dst[y * w + x] = m;
+      }
+      tmp = src; src = dst; dst = tmp;
+    }
+    // feather：3×3 均值，同样横竖各一遍
+    for (let pass = 0; pass < (fe ? 2 : 0); pass++) {
+      const horiz = pass === 0;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let s = 0, c = 0;
+        for (let k = -1; k <= 1; k++) {
+          const xx = horiz ? x + k : x, yy = horiz ? y : y + k;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          s += src[yy * w + xx]; c++;
+        }
+        dst[y * w + x] = Math.round(s / c);
+      }
+      tmp = src; src = dst; dst = tmp;
+    }
+    let changed = 0, opaqueAfter = 0, softAfter = 0;
+    for (let i = 0; i < n; i++) {
+      const v = src[i];
+      if (v !== orig[i]) { px[i * 4 + 3] = v; changed++; }
+      if (v >= 250) opaqueAfter++;
+      else if (v > 8) softAfter++;
+    }
+    g.putImageData(im, 0, 0);
+    return { changed, opaqueBefore, opaqueAfter, softBefore, softAfter };
+  }
+
   global.ARCAM_CUT = {
     cutSolidBg, loadVision, aiCut, detectPose, drawPose,
     loadAnimeSeg, animeCut,
-    contentBounds, cropToCanvas,
+    contentBounds, cropToCanvas, softenEdge,
     POSE_NAMES, POSE_BONES,
     // 模型的本地化：导入 / 查有没有 / 清掉
     importModel, hasLocalModel, forgetLocalModel,
