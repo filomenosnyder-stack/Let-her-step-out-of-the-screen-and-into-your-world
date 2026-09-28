@@ -547,6 +547,26 @@ window.ARCAM_MMD = (function () {
     return built;
   }
 
+  // 把退场的模型从显存里放掉
+  function disposeRoot(r) {
+    if (!r) return;
+    const tex = new Set(), skel = new Set(), mats = new Set();
+    r.traverse(o => {
+      if (o.isSkinnedMesh && o.skeleton) skel.add(o.skeleton);
+      if (o.customDepthMaterial) mats.add(o.customDepthMaterial);
+      if (o.customDistanceMaterial) mats.add(o.customDistanceMaterial);
+      if (!o.isMesh && !o.isLine && !o.isPoints) return;
+      if (o.geometry) o.geometry.dispose();
+      for (const m of (Array.isArray(o.material) ? o.material : [o.material])) if (m) mats.add(m);
+    });
+    for (const m of mats) {
+      for (const k in m) { const v = m[k]; if (v && v.isTexture) tex.add(v); }
+      m.dispose();
+    }
+    for (const s of skel) { try { s.dispose(); } catch (e) {} }
+    for (const t of tex) { try { t.dispose(); } catch (e) {} }
+  }
+
   /** @param src  URL 字符串 / `<input type=file>` 的 File / `<input webkitdirectory>` 的 FileList */
   async function load(src, onProgress, pmxIdx) {
     if (!(await init())) return false;
@@ -595,7 +615,8 @@ window.ARCAM_MMD = (function () {
       }
 
       // ── 收编：清索引 → 挂上 → 重建（两条路径共用这一段）──
-      if (root) { scene.remove(root); root = null; }
+      // 退场的模型要 dispose 之后再丢引用
+      if (root) { scene.remove(root); disposeRoot(root); root = null; }
       bones.clear(); restQ.clear(); boneByKey.clear();
       root = newRoot;
       let tris = 0, nb = 0, nm = 0, nmats = 0;
