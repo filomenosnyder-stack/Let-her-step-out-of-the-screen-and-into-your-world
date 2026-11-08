@@ -50,6 +50,10 @@ export async function readZip(buf) {
   let p = dv.getUint32(eocd + 16, true);            // 中央目录偏移
 
   const out = new Map();
+  // ★ 同名不同目录（`tex/body.png` 与 `tex2/body.png`）在本包里只能留下一个 ——
+  //   以前是**静默跳过后来者**：用户看到的是"某几块贴图是错的/白的"，日志里什么都没有。
+  //   这里把冲突记下来，让上层能明确告诉用户"这两个同名、用的是哪个"（方案 §7.1 / MMD-01）。
+  const dupes = [];
   const skipped = [];                               // 用了不支持的压缩法（LZMA/PPMd）而被跳过的条目
   for (let i = 0; i < count; i++) {
     if (dv.getUint32(p, true) !== SIG_CEN) break;
@@ -75,7 +79,7 @@ export async function readZip(buf) {
     //   以前每个条目都当场解开，于是"整个 zip + 全部解压结果"同时在内存里：
     //   一个 264MB 的模型包（贴图全是几 MB 的 png）在手机上直接爆内存 → 表现就是"导入失败"。
     const base = name.split(/[\\/]/).pop().toLowerCase();
-    if (out.has(base)) continue;
+    if (out.has(base)) { dupes.push({ base, kept: out.get(base).name, dropped: name }); continue; }
     if (method === 0) out.set(base, { bytes, name, usize });
     else if (method === 8) out.set(base, { raw: bytes, method: 8, usize, name });
     else skipped.push(name + '（压缩法 ' + method + '）');   // LZMA(14)/PPMd(98)：2345好压、快压爱用
@@ -83,6 +87,8 @@ export async function readZip(buf) {
   // ⚠ 被跳过的条目要**报出去**：否则"pmx 是 LZMA 压的"会被报成"这个 zip 里没有 .pmx"，
   //   把用户引到"是不是下错包了"这个完全错误的方向（信息全错比没信息更坏）。
   out.skipped = skipped;
+  out.dupes = dupes;
+  if (dupes.length) console.warn('[MMD] 包里有同名不同目录的文件，只能取一个:', dupes.slice(0, 8));
   return out;
 }
 

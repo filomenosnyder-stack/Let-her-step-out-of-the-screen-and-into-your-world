@@ -1,0 +1,20 @@
+android/.gradle/
+android/**/build/
+android/local.properties
+android/keystore/
+android/keystore.properties
+android/app/src/main/assets/web/
+artifacts/
+research/
+node_modules/
+anime/isnet-anime-fp32.onnx
+anime/birefnet-lite.onnx
+docs/anime/isnet-anime-fp32.onnx
+docs/anime/birefnet-lite.onnx
+
+# Local architecture and handoff notes
+/AI-ARCHITECTURE-AS-IS.md
+/AI-DIAGNOSTIC-HANDOFF.md
+/ARCHITECTURE-CHANGE-PROPOSAL.md
+/HANDOVER.md
+/PHASE1-VERIFICATION.md

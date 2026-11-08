@@ -1,0 +1,22 @@
+{
+  "fast": {
+    "file": "isnet-anime-q8.onnx", "bytes": 44214375,
+    "sha256": "cb5f78506887f5250352c04ec8ea242874db3434f0b4a216d041a810b20377e3",
+    "source": "https://github.com/SkyTNT/anime-segmentation",
+    "input": "RGB [0,1], 1024 square with black letterbox", "output": "probability"
+  },
+  "anime": {
+    "file": "isnet-anime-fp32.onnx", "bytes": 176069933,
+    "sha256": "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
+    "source": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-anime.onnx",
+    "input": "RGB [0,1], 1024 square with black letterbox", "output": "probability"
+  },
+  "birefnet": {
+    "file": "birefnet-lite.onnx", "bytes": 224005088,
+    "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+    "repo": "onnx-community/BiRefNet_lite-ONNX",
+    "revision": "de15b22ba131738a16dff04aab8bdf8dc32e3ac1", "remote_file": "onnx/model.onnx",
+    "source": "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX",
+    "input": "RGB ImageNet mean/std, resized to 1024 square", "output": "logits; apply sigmoid"
+  }
+}

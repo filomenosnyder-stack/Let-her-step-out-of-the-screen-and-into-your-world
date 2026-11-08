@@ -20,13 +20,15 @@ window.ARCAM_MMD = (function () {
   const D2R = Math.PI / 180;
 
   // ── 引擎与场景 ──────────────────────────────────────────────────────
-  let THREE = null, GLTFLoader = null;
+  let THREE = null, GLTFLoader = null, VmdObject = null, buildAnimation = null, MMDAnimationManager = null;
   let renderer = null, scene = null, camera = null, glCanvas = null;
   let post = null, postCtx = null, grainTile = null, grainCv = null;
-  let root = null, mixer = null;
+  let characterPass = null, groundComposite = null;
+  let root = null, mixer = null, mmdModel = null, motionAction = null, motionManager = null;
+  let motionPlaying = false, motionLastTime = 0, motionName = '';
 
   // ── 模型状态 ────────────────────────────────────────────────────────
-  let modelH = 1.734, bones = new Map(), restQ = new Map(), boneByKey = new Map();
+  let modelH = 1.734, bones = new Map(), restQ = new Map(), restP = new Map(), boneByKey = new Map();
   // 脚底参考高度（模型自身坐标，米）。**不能用几何包围盒下边当脚底** —— 见 footRefY()
   let feetRef = 0;
   let defaultPoses = null;
@@ -85,6 +87,8 @@ window.ARCAM_MMD = (function () {
   }
   // 光照参数（可调；默认值是"看着像实景"的一版）
   const L = {
+    material: 'toon',
+    selfShadow: false,
     keyAz: -38,      // 主光方位角（度，0=从相机这边照过去 → +Z）
     keyEl: 52,       // 主光高度角
     keyInt: 2.1,
@@ -92,7 +96,10 @@ window.ARCAM_MMD = (function () {
     rimInt: 0.75,
     shadow: true,
     shadowOpacity: 0.42,
-    grain: true,
+    // ★ 颗粒默认 **关**。这一层是把一张 128±63 的灰噪砖用 source-atop 混上去，
+    //   代价是**颜色被拉向灰、对比度下降**（方案 §6.3 实测过）。「清晰」是出厂配置，
+    //   要颗粒请自己开 —— 开了以后参数和以前一样。
+    grain: false,
     outline: 0,
     // ★ 接触暗缝：投影阴影管"光从哪来"，它管"脚踩在地上"。
     //   单独一盏几乎垂直向下的灯 + 一圈只框住脚下的紧正交框 —— 因为主光斜射时，
@@ -105,7 +112,10 @@ window.ARCAM_MMD = (function () {
     iblIntensity: 1.0,
     // ★ 景深：光圈未知，所以做的是"相对焦平面的近似虚化"。
     //   dof 0~1 是强度、focus 是焦平面距离（米，null = 跟人物同距）、dofMax 是最大模糊半径(px@f=1000)。
-    dof: 0.45,
+    // ★ 景深默认 **0**（关闭）。原来默认 0.45，靠 focus=null 让离焦量恰好为 0 ——
+    //   数值上等于没开，但滑条上写着 0.45，用户一拖焦点就突然糊一片，看起来像"本来就该糊"。
+    //   「清晰」是出厂配置：要景深请自己设焦点（方案 §6.2）。
+    dof: 0,
     focus: null,
     dofMax: 7,
     // ★ 主光方向：**必须给用户一个滑块**。方向从一张照片里估不准（HANDBOOK §4.7：
@@ -133,6 +143,10 @@ window.ARCAM_MMD = (function () {
         }
         const gl = await import('./mmd/loaders/GLTFLoader.js');
         GLTFLoader = gl.GLTFLoader;
+        const motion = await import(SELF_DIR + 'mmd/three-mmd/index.js');
+        VmdObject = motion.VmdObject;
+        buildAnimation = motion.buildAnimation;
+        MMDAnimationManager = motion.MMDAnimationManager;
         // PMX 那条线要的构建器（顺带导出骨名归一化 boneKey —— 查姿势每次都要用）
         pmxMod = null;   // 自写转换器已删，改用官方 @moeru/three-mmd（下面的 import 都去掉了）
         pmxBuilder = pmxMod;
@@ -157,6 +171,8 @@ window.ARCAM_MMD = (function () {
     renderer.setPixelRatio(1);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NeutralToneMapping;
 
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera();
@@ -185,6 +201,10 @@ window.ARCAM_MMD = (function () {
       new THREE.ShadowMaterial({ opacity: L.shadowOpacity })
     );
     shadowPlane.rotation.x = -Math.PI / 2;
+    // Ground shadow receivers must be drawn before transparent hair/clothing.
+    // Their large plane origins otherwise sort in front of a PMX model and paint
+    // the cast shadow over every material that does not write depth.
+    shadowPlane.renderOrder = -2;
     shadowPlane.receiveShadow = true;
     scene.add(shadowPlane);
 
@@ -203,6 +223,7 @@ window.ARCAM_MMD = (function () {
     );
     contactPlane.rotation.x = -Math.PI / 2;
     contactPlane.position.y = 0.0015;
+    contactPlane.renderOrder = -1;
     contactPlane.receiveShadow = true;
     scene.add(contactPlane);
   }
@@ -460,7 +481,8 @@ window.ARCAM_MMD = (function () {
     //    ⚠ 失败就退回我自己那套（不把页面搞挂）；两条路都通了之后再删旧的那套。
     let built = null;
     try {
-      const { MMDLoader } = await import(SELF_DIR + 'mmd/three-mmd/index.js');
+      const { MMDLoader, MMDMaterialPlugin } = await import(SELF_DIR + 'mmd/three-mmd/index.js');
+      const { MMDAmmoPlugin } = await import(SELF_DIR + 'mmd/three-mmd/ammo-physics.js');
       const blobs = new Map();
       if (pkg) {
         for (const [k, e] of pkg) {
@@ -495,6 +517,10 @@ window.ARCAM_MMD = (function () {
         if (tBlob) blobs.set(tkey, URL.createObjectURL(tBlob));
       }
       const mgr = new THREE.LoadingManager();
+      let resourcesIdle=false, modelBuilt=false, finishTextures;
+      const texturesReady=new Promise(resolve=>{finishTextures=resolve;});
+      mgr.onStart=()=>{resourcesIdle=false;};
+      mgr.onLoad=()=>{resourcesIdle=true;if(modelBuilt)finishTextures();};
       // 自检用：记下每一次贴图请求**有没有命中我造的 blob**。
       // ⚠ 没有这个记录，"toon01.bmp 到底走没走到我造的那张"就只能靠猜 —— 上一轮就是因此分不清
       //   "修复没生效" 和 "指标看不见"。真机/自检里看 window.__texHit 即可。
@@ -508,7 +534,30 @@ window.ARCAM_MMD = (function () {
         return hit || u;
       });
       const pmxUrl = URL.createObjectURL(new Blob([ab], { type: 'application/octet-stream' }));
-      const mmd = await new MMDLoader(mgr).loadAsync(pmxUrl);
+      const modelLoader = new MMDLoader(mgr).register(MMDAmmoPlugin);
+      if (L.material === 'physical') {
+        const { MMDPhysicalMaterial } = await import(SELF_DIR + 'mmd/three-mmd/materials/physical.js');
+        // PMX ambient often carries the authored albedo. Transfer it into the physical
+        // base color so models with a dark diffuse term do not turn black.
+        const baseColor = (diffuse, ambient) => {
+          const color=diffuse.clone();if(ambient)color.add(ambient);
+          color.r=Math.min(1,color.r);color.g=Math.min(1,color.g);color.b=Math.min(1,color.b);return color;
+        };
+        class ScenePhysicalMaterial extends MMDPhysicalMaterial {
+          constructor(descriptor) {
+            super({...descriptor,diffuse:baseColor(descriptor.diffuse,descriptor.ambient)});
+            this.roughness=Math.max(.5,this.roughness);this.specularIntensity=.3;
+          }
+          applyMMDMaterialState(state) {
+            super.applyMMDMaterialState({...state,diffuse:baseColor(state.diffuse,state.ambient)});
+            this.roughness=Math.max(.5,this.roughness);this.specularIntensity=.3;
+          }
+        }
+        modelLoader.register(parser => new MMDMaterialPlugin(parser, { materialType: ScenePhysicalMaterial }));
+      }
+      const mmd = await modelLoader.loadAsync(pmxUrl);
+      modelBuilt=true;if(resourcesIdle)finishTextures();
+      await texturesReady;
       const root2 = mmd.skinnedMesh || mmd.mesh || mmd;
       if (root2 && root2.isObject3D) {
         let nb = 0, nt = 0, nm2 = 0;
@@ -520,10 +569,22 @@ window.ARCAM_MMD = (function () {
             if (o.morphTargetDictionary) nm2 = Math.max(nm2, Object.keys(o.morphTargetDictionary).length);
           }
         });
+        // ★ 真实贴图统计。原来写的是 `texOk: blobs.size, texMiss: 0` ——
+        //   blobs 收的是**包里所有图片**，跟这个 PMX 到底引用了哪几张毫无关系。
+        //   于是"缺了 6 张贴图"和"18 张全齐"在日志里长得一模一样（用户看到白模，日志说全绿）。
+        //   现在按 LoadingManager 实际发出的**贴图请求**去重统计：命中 = 真拿到了图，
+        //   未命中 = PMX 要的这张包里没有（或被同名覆盖）。
+        const req = new Map();                      // base → 是否命中
+        for (const t of texHit) if (!req.has(t.base)) req.set(t.base, t.hit);
+        let okTex = 0; const missTex = [];
+        for (const [base, hit] of req) { if (hit) okTex++; else missTex.push(base); }
+        if (missTex.length) console.warn('[MMD] 这些贴图没找到（' + missTex.length + ' 张）:', missTex.slice(0, 12));
         built = {
           root: root2, height: 0,
-          stats: { tris: Math.round(nt), bones: nb, morphs: nm2, materials: 0, textures: blobs.size },
-          texOk: blobs.size, texMiss: 0, official: mmd,
+          stats: { tris: Math.round(nt), bones: nb, morphs: nm2, materials: 0,
+                   textures: req.size, texOk: okTex, texMiss: missTex.length,
+                   texMissing: missTex.slice(0, 12), dupNames: (pkg && pkg.dupes ? pkg.dupes.length : 0) },
+          texOk: okTex, texMiss: missTex.length, official: true, mmd,
         };
         built.official = true;
         // ⚠ 官方装配出来的网格要自己挂进我的阴影系统：不设 castShadow 就会"影子开关没差别"。
@@ -553,6 +614,7 @@ window.ARCAM_MMD = (function () {
     if (busy) return false;
     busy = true;
     const t0 = performance.now();
+    error = null;
     try {
       // ★ 文件夹导入（webkitdirectory）：MMD 模型常常是**散开的一堆文件**
       //   （身体.pmx + 脸.png + 花.png…），不是一个 zip。FileList 没有单一"文件头"可嗅，
@@ -586,6 +648,7 @@ window.ARCAM_MMD = (function () {
           new GLTFLoader().load(url, res, null, rej));
         setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 30000);
         newRoot = gltf.scene;
+        lastLoad = null; pkgPmx = [];
         const ud = newRoot.userData || {};
         const asm = (gltf.parser && gltf.parser.json && gltf.parser.json.scenes
           && gltf.parser.json.scenes[0] && gltf.parser.json.scenes[0].extras) || {};
@@ -595,15 +658,35 @@ window.ARCAM_MMD = (function () {
       }
 
       // ── 收编：清索引 → 挂上 → 重建（两条路径共用这一段）──
-      if (root) { scene.remove(root); root = null; }
-      bones.clear(); restQ.clear(); boneByKey.clear();
+      if (motionManager) motionManager.dispose();
+      if (mixer) { mixer.stopAllAction(); mixer = null; }
+      motionManager = null;
+      motionAction = null; motionPlaying = false; motionName = '';
+      if (mmdModel) mmdModel.dispose();
+      mmdModel = info && info.mmd ? info.mmd : null;
+      if (root) {
+        scene.remove(root);
+        const textures=new Set();
+        root.traverse(object=>{
+          if(!object.isMesh)return;
+          object.geometry?.dispose();
+          for(const material of (Array.isArray(object.material)?object.material:[object.material])) {
+            if(!material)continue;
+            for(const value of Object.values(material))if(value && value.isTexture)textures.add(value);
+            material.dispose();
+          }
+        });
+        for(const texture of textures)texture.dispose();
+        root=null;
+      }
+      bones.clear(); restQ.clear(); restP.clear(); boneByKey.clear();
       root = newRoot;
       let tris = 0, nb = 0, nm = 0, nmats = 0;
       const texSet = new Set();
       root.traverse(o => {
         if (o.isMesh) {
           o.castShadow = true;
-          o.receiveShadow = false;         // 立绘自己不吃自己的影子（MMD 本来也没有自阴影）
+          o.receiveShadow = true;
           const g = o.geometry;
           tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
           if (o.morphTargetInfluences) nm = Math.max(nm, o.morphTargetInfluences.length);
@@ -620,6 +703,7 @@ window.ARCAM_MMD = (function () {
           const k = boneKey(o.name);
           if (!boneByKey.has(k)) boneByKey.set(k, o);      // ⚠ 归一化索引：PMX 原件是 `左腕`，
           restQ.set(o.name, o.quaternion.clone());         //   而姿势表按 mmd_tools 的 `腕.L` 写
+          restP.set(o.name, o.position.clone());
         }
       });
       scene.add(root);
@@ -677,6 +761,9 @@ window.ARCAM_MMD = (function () {
       stats.textures = info.stats.textures || texSet.size;
       // 真正落到 GPU 上的贴图数（info.stats.textures 只是"引用了多少张"）
       stats.texOk = info.texOk || 0; stats.texMiss = info.texMiss || 0;
+      // 缺哪几张、包里有几组同名 —— 只记数量的话，用户报"白模"时仍然无从下手。
+      stats.texMissing = (info.stats && info.stats.texMissing) || [];
+      stats.dupNames = (info.stats && info.stats.dupNames) || 0;
       stats.official = !!info.official;   // 是否走的官方 MMDLoader（toon 材质不吃 scene.environment）
       pmxIndex = info.pmxIndex || 0;
       stats.poses = poses ? poses.poses.length : 0;
@@ -768,12 +855,18 @@ window.ARCAM_MMD = (function () {
 
   function resetRig() {
     if (!root) return;
+    if (mmdModel) { mmdModel.animationPose = undefined; mmdModel.grantSolver.reset(); mmdModel.ikSolver.reset(); }
     root.traverse(o => {
-      if (o.isBone) { const q = restQ.get(o.name); if (q) o.quaternion.copy(q); }
+      if (o.isBone) {
+        const q = restQ.get(o.name), p = restP.get(o.name);
+        if (q) o.quaternion.copy(q);
+        if (p) o.position.copy(p);
+      }
       if (o.isMesh && o.morphTargetInfluences) o.morphTargetInfluences.fill(0);
     });
   }
   function setPose(idx) {
+    if (motionAction) clearMotion();
     curPose = idx;
     if (!root) return { hit: 0, morphs: 0, miss: [] };
     resetRig();
@@ -823,6 +916,67 @@ window.ARCAM_MMD = (function () {
     return { hit, morphs, miss };
   }
   const poseNames = () => PROC_POSES.map(p => p.name);
+  async function loadMotion(file) {
+    if (!root || !mmdModel || !file) return false;
+    try {
+      const bytes = await file.arrayBuffer();
+      const vmd = VmdObject && VmdObject.ParseFromBuffer(bytes);
+      if (!vmd) throw new Error('当前动作解析器不支持此 VMD 文件');
+      clearMotion(); resetRig();
+      const clip = buildAnimation(vmd, mmdModel.mesh);
+      if (!clip || !clip.tracks || !clip.tracks.length) throw new Error('没有找到与当前模型骨骼匹配的动作轨道');
+      motionManager = new MMDAnimationManager();
+      motionManager.add(mmdModel, { animation: clip });
+      mixer = motionManager.models.get(mmdModel);
+      motionAction = mixer.clipAction(clip);
+      motionAction.setLoop(THREE.LoopRepeat, Infinity).play();
+      motionPlaying = true; motionLastTime = 0; motionName = file.name || 'VMD';
+      appliedPose = -2;
+      return { ok: true, tracks: clip.tracks.length, duration: clip.duration, name: motionName };
+    } catch (e) { setError('动作载入失败：' + ((e && e.message) || e)); return false; }
+  }
+  function playIdle() {
+    if (!mmdModel) return false;
+    const pose = curPose >= 0 ? curPose : 0;
+    clearMotion(); setPose(pose);
+    const tracks = [], times = [0,1.4,2.8,4.2,5.6];
+    for (const [name, axis, amplitude] of [['上半身','x',.8],['上半身2','x',.5],['首','y',.7],['頭','z',.4]]) {
+      const bone = lookupBone(name); if (!bone) continue;
+      const direction = new THREE.Vector3(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0);
+      const values = [];
+      for (let i=0;i<times.length;i++) {
+        const q=bone.quaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(direction,Math.sin(i*Math.PI/2)*amplitude*D2R));
+        values.push(q.x,q.y,q.z,q.w);
+      }
+      tracks.push(new THREE.QuaternionKeyframeTrack('.bones['+bone.name+'].quaternion',times,values));
+    }
+    const mesh=mmdModel.mesh, dict=mesh.morphTargetDictionary;
+    if(dict) {
+      const index=dict['まばたき'] ?? dict['blink'];
+      if(index!==undefined) tracks.push(new THREE.NumberKeyframeTrack('.morphTargetInfluences['+index+']',[0,2.1,2.18,2.3,4.7,4.78,4.9,5.6],[0,0,1,0,0,1,0,0]));
+    }
+    if(!tracks.length)return false;
+    const clip=new THREE.AnimationClip('自然呼吸',5.6,tracks);
+    motionManager=new MMDAnimationManager();motionManager.add(mmdModel,{animation:clip});
+    mixer=motionManager.models.get(mmdModel);motionAction=mixer.clipAction(clip);
+    motionPlaying=true;motionName='自然呼吸';motionLastTime=0;appliedPose=-2;
+    mmdModel.physics?.reset?.();
+    return true;
+  }
+  function pauseMotion(paused) {
+    if (!motionAction) return false;
+    motionPlaying = !paused;
+    motionLastTime = 0;
+    if (paused) motionAction.paused = true;
+    else { motionAction.paused = false; motionAction.play(); }
+    return motionPlaying;
+  }
+  function clearMotion() {
+    if (motionManager) motionManager.dispose();
+    if (mixer) mixer.stopAllAction();
+    motionManager = null; mixer = null; motionAction = null; motionPlaying = false; motionLastTime = 0; motionName = '';
+    appliedPose = -1;
+  }
   /** 给自检量姿势用：某根骨的**世界**坐标（查不到返回 null） */
   function boneWorld(name) {
     if (!root) return null;
@@ -879,9 +1033,9 @@ window.ARCAM_MMD = (function () {
     //    根因：**半球光把所有朝向都填亮了** → toon 的分档阈值被整体抬过 → 只剩亮档、暗档永不出现，
     //    平行主光的明暗差被淹没。所以砍半球光、拉主光，让分档能被触发。
     //    实测基线：模型朝光侧/背光侧亮度差 ≈ 0；**目标 ΔL ∈ [30, 80]**（锚在画面的 σ_lum × 1.5）。
-    hemi.intensity = L.ambInt * gain * 0.25;
+    hemi.intensity = L.ambInt * gain * 0.42;
     key.color.setRGB(Math.min(1, tint[0] * 1.06), Math.min(1, tint[1] * 1.0), Math.min(1, tint[2] * 0.95));
-    key.intensity = L.keyInt * gain * 1.6;      // 拉高主光：toon 分档靠 dot(N,L) 的切分点，光不够就切不出来
+    key.intensity = L.keyInt * gain;
     rim.color.setRGB(tint[0] * 0.78 + 0.12, tint[1] * 0.82 + 0.14, 1.0 * tint[2]);
     rim.intensity = L.rimInt * gain;
     renderer.toneMappingExposure = 1;
@@ -894,12 +1048,12 @@ window.ARCAM_MMD = (function () {
   /** 在 **1/2 分辨率**上做分离式 box blur（累加绘制：N 个带 alpha 的平移拷贝之和），
    *  再交给调用方升采样回去。为什么不用 `ctx.filter='blur()'`：见 render() 里那段注释
    *  —— 它在 --disable-gpu 的 headless 里静默失效，像素一个都不动。 */
-  function defocusLayer(radius) {
+  function defocusLayer(radius, sourceCanvas = glCanvas) {
     const w = Math.max(1, glCanvas.width >> 1), h = Math.max(1, glCanvas.height >> 1);
     if (!blurA) { blurA = document.createElement('canvas'); blurB = document.createElement('canvas'); }
     for (const c of [blurA, blurB]) if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
     const ga = blurA.getContext('2d'), gb = blurB.getContext('2d');
-    ga.clearRect(0, 0, w, h); ga.drawImage(glCanvas, 0, 0, w, h);
+    ga.clearRect(0, 0, w, h); ga.drawImage(sourceCanvas, 0, 0, w, h);
     const taps = Math.max(1, Math.min(6, Math.round(radius / 2)));   // tap 数封顶：手机端别爆
     const step = radius / taps;
     const a = 1 / (taps * 2 + 1);
@@ -957,9 +1111,12 @@ window.ARCAM_MMD = (function () {
    * @returns 渲染耗时 ms；失败返回 0
    */
   function render(o) {
-    if (!ready || !root) return 0;
+    // ⚠ 返回 null = 没就绪。**不能返回 0** —— 一帧真有可能耗时 0.4ms、四舍五入成 0，
+    //   调用方拿 `if (!ms) return false` 一判，就会把"画好了"当成"没画"而退回 2D。
+    if (!ready || !root) return null;
     const t0 = performance.now();
     const W = Math.max(1, Math.round(o.W)), H = Math.max(1, Math.round(o.H));
+    root.traverse(object=>{if(object.isMesh)object.receiveShadow=L.selfShadow;});
     if (glCanvas.width !== W || glCanvas.height !== H) {
       renderer.setSize(W, H, false);
     }
@@ -967,7 +1124,12 @@ window.ARCAM_MMD = (function () {
     // ⚠ 姿势只在**换过**的时候重套：resetRig 要遍历 572 根骨 + 33 个网格，
     //   每帧都做的话手机端白烧一大截帧时间。
     const want = (o.pose === undefined) ? curPose : o.pose;
-    if (want !== appliedPose) {
+    // ★ 时间**不在这里推进**。原来这一段按 performance.now() 自己算 dt 再 update，
+    //   于是"多画一帧就多走一步"：拖滑条、改光照、导出前多画一次，动作都会往前跳。
+    //   现在推进只在 advanceMotion() 里发生，render 只读已经解好的状态。
+    if (mixer && motionAction) {
+      appliedPose = -2;          // 有动作时姿势由动画轨道决定，不再套静态姿势
+    } else if (want !== appliedPose) {
       const pr = setPose(want);
       appliedPose = want;
       stats.poseHit = pr.hit; stats.poseMiss = pr.miss.length;
@@ -975,11 +1137,10 @@ window.ARCAM_MMD = (function () {
     }
 
     const s = (o.hp * (o.scale === undefined ? 1 : o.scale)) / modelH;
-    root.scale.setScalar(s);
+    if (mmdModel) mmdModel.setScalar(s); else root.scale.setScalar(s);
     root.position.set(o.x || 0, -feetRef * s, -(o.d || 4));   // 脚底踩地（不是"原点踩地"）
     root.rotation.set(0, 0, 0);
     root.updateMatrixWorld(true);
-
     camera.matrixWorldInverse.copy(viewMatrix(o.pitch, o.roll, o.camH));
     camera.matrixWorld.copy(camera.matrixWorldInverse).invert();
     camera.projectionMatrix.copy(projMatrix(o.f, W, H, 0.05, 120));
@@ -1028,7 +1189,46 @@ window.ARCAM_MMD = (function () {
     // ★ 照片当环境贴图（o.envFrame 是页面压小的当前帧；没有就用统计量造渐变）
     if (L.ibl) buildEnv(o.envFrame, o.env);
     else if (scene.environment) scene.environmentIntensity = 0;
-    renderer.render(scene, camera);
+    // Render the character and the ground receivers as separate transparent layers.
+    // PMX alpha policies can disable depth writes for hair/clothing; a large ground
+    // receiver must never paint its shadow on top of those character pixels.
+    if(!characterPass){characterPass=document.createElement('canvas');groundComposite=document.createElement('canvas');}
+    for(const target of [characterPass,groundComposite])if(target.width!==W || target.height!==H){target.width=W;target.height=H;}
+    shadowPlane.visible=false;contactPlane.visible=false;
+    renderer.render(scene,camera);
+    const cg=characterPass.getContext('2d');cg.clearRect(0,0,W,H);cg.drawImage(glCanvas,0,0);
+    let sceneLayer=characterPass;
+    if(L.shadow || L.contact) {
+      const previousAutoUpdate=renderer.shadowMap.autoUpdate;
+      const prevKeyCast=key.castShadow, prevContactCast=contact.castShadow;
+      try {
+        renderer.shadowMap.autoUpdate=false;
+        root.visible=false;
+        const gg=groundComposite.getContext('2d');gg.clearRect(0,0,W,H);
+        stats.groundPasses=[];       // 诊断用：这一帧到底分了几趟、每趟是谁
+        // ★ 两盏灯 / 两块接收面**分开渲染**。
+        //   一起渲的时候，每块接收面都会同时收到两盏灯的影子 ——
+        //   同一道主投影会被算两遍，叠出来就是"影子特别重、边缘有两层"。
+        //   Three 的 receiveShadow 是**逐物体**的，没法说"这块面只收那盏灯"，
+        //   所以只能在渲染调用上分开：一次只让一盏灯投影、只让一块面出现在场景里。
+        //   （shadowMap.autoUpdate 已经是 false，所以影子贴图不会重算，
+        //     这里真正起作用的是"哪块接收面可见"。）
+        const pass=(main,soft)=>{
+          key.castShadow=main; contact.castShadow=soft;
+          shadowPlane.visible=main; contactPlane.visible=soft;
+          stats.groundPasses.push(main?'main':(soft?'contact':'none'));
+          renderer.render(scene,camera);
+          gg.drawImage(glCanvas,0,0);
+        };
+        if(L.shadow)  pass(true,false);
+        if(L.contact) pass(false,true);
+        gg.drawImage(characterPass,0,0);sceneLayer=groundComposite;
+      } finally {
+        root.visible=true;renderer.shadowMap.autoUpdate=previousAutoUpdate;
+        key.castShadow=prevKeyCast; contact.castShadow=prevContactCast;
+        shadowPlane.visible=L.shadow; contactPlane.visible=L.contact;
+      }
+    }
 
     // ── 后处理：先景深（模糊），再颗粒 ────────────────────────────────
     // ★ 景深：真实光圈不知道，所以这里给的是**相对焦平面的模糊量**，而且是**近似**——
@@ -1036,13 +1236,13 @@ window.ARCAM_MMD = (function () {
     //   人物站在一个距离上，身体进深只有几十厘米，所以一层整体模糊已经很接近真实的焦外。
     // ⚠ 绝不能用 `ctx.filter = 'blur(Npx)'`：HANDBOOK §4.14 记过 —— 在 --disable-gpu 的
     //   headless 里它**静默失效**（属性读得回来，像素一个都不动），Safari 老版本同样忽略。
-    let src = glCanvas;
+    let src = sceneLayer;
     if (L.dof > 0) {
       const focus = (L.focus === null || L.focus === undefined) ? (o.d || 4) : L.focus;
       // 离焦平面多远 → 模糊多大。除以 focus 是让它跟距离成比例，近处更敏感。
       const defocus = Math.min(1, Math.abs((o.d || 4) - focus) / Math.max(0.6, focus * 0.6));
       const radius = L.dof * defocus * L.dofMax * (o.f / 1000);
-      if (radius >= 0.6) src = defocusLayer(radius);
+      if (radius >= 0.6) src = defocusLayer(radius,sceneLayer);
     }
 
     // 颗粒：只加在颜色上、不碰 alpha（加 alpha 会让边缘长毛刺）
@@ -1078,9 +1278,44 @@ window.ARCAM_MMD = (function () {
     return stats.renderMs;
   }
 
+  /**
+   * 推进动画与物理。**必须由调用方在渲染之外显式调用。**
+   * @param nowMs 可选；固定步长或测试时自己传，默认取 performance.now()
+   * @returns 实际推进的秒数（没在播放时是 0）
+   * ⚠ 暂停时把 motionLastTime 清零：恢复播放的第一帧 dt=0，
+   *   不会把"暂停了多久"一次性补算成一大步（物理会炸）。
+   */
+  function advanceMotion(nowMs){
+    if (!motionManager || !motionAction) return 0;
+    const now = (nowMs == null) ? performance.now() : nowMs;
+    const dt = (motionPlaying && motionLastTime) ? Math.min(0.1, (now - motionLastTime) / 1000) : 0;
+    motionLastTime = now;
+    if (dt <= 0) return 0;
+    motionManager.update(dt, { physics: true });
+    appliedPose = -2;
+    return dt;
+  }
+
   /** 给外部（预览/出图）拿去 drawImage 的那张画布：有颗粒就用后处理那张 */
   return {
-    init, load, render, setPose, poseNames, setEnv, boneWorld,
+    init, load, render, advanceMotion, setPose, poseNames, setEnv, boneWorld, loadMotion, pauseMotion, clearMotion, playIdle,
+    get motionPlaying() { return motionPlaying; }, get motionName() { return motionName; },
+    get canAnimate() { return !!mmdModel; },
+    get motionTime() { return motionAction ? motionAction.time : 0; },
+    get physicsReady() { return !!(mmdModel && mmdModel.physics); },
+    materialInfo: () => {
+      const result=[];
+      root?.traverse(object=>{if(object.isMesh)for(const m of (Array.isArray(object.material)?object.material:[object.material])) {
+        if(result.length<12)result.push({name:m.name,color:m.color?.toArray(),diffuse:m.descriptor?.diffuse?.toArray(),ambient:m.descriptor?.ambient?.toArray(),map:!!m.map,roughness:m.roughness});
+      }});return result;
+    },
+    setMaterialStyle: async style => {
+      if (!['toon','physical'].includes(style) || !lastLoad) return false;
+      const previous = L.material; L.material = style;
+      const ok = await load(lastLoad.src, null, pmxIndex);
+      if (!ok) L.material = previous;
+      return ok;
+    },
     // 一个文件夹里有好几个模型时用这三条：列出全部 pmx / 当前是第几个 / 换一个
     modelNames: () => pkgPmx.map(e => e.name),
     modelIndex: () => pmxIndex,

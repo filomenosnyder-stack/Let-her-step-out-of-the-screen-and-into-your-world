@@ -1,0 +1,26 @@
+<resources>
+    <style name="Theme.ArcView" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- 滑条、勾选、对话框按钮的强调色 -->
+        <item name="colorAccent">#4FC3F7</item>
+        <item name="colorControlActivated">#4FC3F7</item>
+        <item name="colorControlNormal">#6E7A85</item>
+
+        <item name="android:textColorPrimary">#E8EEF3</item>
+        <item name="android:textColorSecondary">#8B98A3</item>
+        <item name="android:textColorHint">#6E7A85</item>
+
+        <!-- 对话框跟着走暗色，别弹一个白板出来 -->
+        <item name="android:alertDialogTheme">@style/Theme.ArcView.Dialog</item>
+    </style>
+
+    <style name="Theme.ArcView.Dialog" parent="Theme.AppCompat.Dialog.Alert">
+        <item name="android:background">#12171C</item>
+        <item name="android:textColorPrimary">#E8EEF3</item>
+        <item name="colorAccent">#4FC3F7</item>
+    </style>
+</resources>

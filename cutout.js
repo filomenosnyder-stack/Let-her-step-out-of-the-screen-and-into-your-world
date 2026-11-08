@@ -76,7 +76,7 @@
 
     // alpha 先二值化，再 3×3 均值柔化一刀，免得边缘是锯齿
     const a = new Uint8Array(w * h);
-    for (let p = 0; p < w * h; p++) a[p] = isBg[p] ? 0 : 255;
+    for (let p = 0; p < w * h; p++) a[p] = isBg[p] ? 0 : px[p * 4 + 3];
     if (o.feather > 0) {
       const r = Math.max(1, Math.round(o.feather));
       const t = new Uint8Array(w * h);
@@ -87,7 +87,9 @@
           if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
           s += a[yy * w + xx]; n++;
         }
-        t[y * w + x] = (s / n) | 0;
+        // Feather inward only: spreading alpha onto removed background exposes
+        // its RGB as a dark/white fringe, and must never fill existing PNG holes.
+        t[y * w + x] = Math.min(a[y * w + x], (s / n) | 0);
       }
       a.set(t);
     }
@@ -308,8 +310,9 @@
     return './anime/';   // 兜底：按文档相对（等于"站点根就在这一层"那种布局）
   })();
   const SEG_SZ = 1024;
-  const SEG_MEAN = [0.485, 0.456, 0.406];
-  const SEG_STD  = [0.229, 0.224, 0.225];
+  // SkyTNT ISNet-anime expects RGB in [0,1], unlike ImageNet-normalized BiRefNet.
+  const SEG_MEAN = [0, 0, 0];
+  const SEG_STD  = [1, 1, 1];
   let _segSess = null, _segLoading = null;
 
   function loadScriptOnce(src){
@@ -740,7 +743,7 @@
     og.drawImage(canvas, 0, 0);
     const src = og.getImageData(0, 0, w, h);
     // ⚠ sm 本身已经是 .data 了（上面取的时候就已经 .data 过一道），别再点一次 .data
-    for (let i = 0; i < w * h; i++) src.data[i*4+3] = sm[i*4+3];
+    for (let i = 0; i < w * h; i++) src.data[i*4+3] = Math.round(sm[i*4+3] * src.data[i*4+3] / 255);
     og.putImageData(src, 0, 0);
 
     return { canvas: o, fg: fg / (W * H), ms: Math.round(performance.now() - t0) };
@@ -833,5 +836,6 @@
     POSE_NAMES, POSE_BONES,
     // 模型的本地化：导入 / 查有没有 / 清掉
     importModel, hasLocalModel, forgetLocalModel,
+    modelBytes: async () => _segBuf || ((await readCachedModel()) || {}).buf || null,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -7,11 +7,12 @@
 <title>AR 取景器 · 手机端</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  [hidden] { display:none!important; }
   html,body { margin:0; height:100%; background:#000; overflow:hidden;
               font:13px/1.5 system-ui,"PingFang SC","Microsoft YaHei",sans-serif; color:#e8eef3; }
   /* 铺满：预览按 cover 撑满整屏，多出来的两边裁掉，不留黑边 */
   #stage { position:fixed; inset:0; overflow:hidden; }
-  #v, #c { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); }
+  #v, #scenePhotoCanvas, #c { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); }
   #c { pointer-events:none; }
 
   #hud { position:fixed; left:10px; top:calc(10px + env(safe-area-inset-top));
@@ -28,11 +29,12 @@
      快门永远在把手这一条上 —— 收起状态也得能按得到，不然就没意义了。 */
   #dock { position:fixed; left:0; right:0; bottom:0; z-index:20; }
   /* 面板要不透明：大太阳下底下透出实时画面，字就读不清了 */
-  #sheet { max-height:0; overflow:hidden; background:#0b0e11;
-           border-top:1px solid #ffffff14; transition:max-height .22s ease;
+  #sheet { max-height:0; overflow:hidden; background:linear-gradient(160deg,#111820 0%,#090c10 55%);
+           border:1px solid #ffffff18; border-bottom:0; border-radius:18px 18px 0 0;
+           box-shadow:0 -16px 48px #0008; transition:max-height .22s ease;
            -webkit-overflow-scrolling:touch; }
-  #sheet.open { max-height:60vh; overflow-y:auto; }
-  #sheetIn { padding:10px 12px 6px; }
+  #sheet.open { max-height:72vh; overflow-y:auto; overscroll-behavior:contain; }
+  #sheetIn { padding:14px 14px 12px; }
   #bar { display:flex; gap:8px; align-items:stretch;
          padding:8px 12px calc(8px + env(safe-area-inset-bottom));
          background:linear-gradient(#0000,#0000009c 38%); }
@@ -84,7 +86,18 @@
   #shot { flex:2; background:#c2402fdd; border-color:#e05540; color:#fff; font-weight:600; }
 
   /* 分区标题 */
-  .sec { margin:12px 0 2px; font-size:12px; color:#7dfcff; letter-spacing:.5px; }
+  .sec { margin:16px 0 4px; padding:0 0 5px; border-bottom:1px solid #ffffff12;
+         font-size:12px; color:#8cecff; letter-spacing:.6px; font-weight:650; }
+  #motion3dRow button:disabled { opacity:.45; }
+  #motion3dRow button:first-child { background:#17242b; border-color:#31505e; }
+  #motion3dRow button:last-child { background:#17372f; border-color:#326b58; }
+  #workspaceTabs { display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:10px 12px;position:sticky;top:0;z-index:2;background:#10171f;border-bottom:1px solid #ffffff14; }
+  #workspaceTabs button { min-height:44px;border:1px solid transparent;border-radius:10px;background:#1a242f;color:#99aab9;font:600 13px system-ui; }
+  #workspaceTabs button[aria-selected=true] { color:#e4fcff;background:#164655;border-color:#358399; }
+  #actionToast { position:fixed;left:50%;bottom:calc(156px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:60;max-width:88vw;width:max-content;padding:10px 14px;border:1px solid #48707e;border-radius:12px;background:#10222ef0;color:#e7f8ff;font-size:12px;box-shadow:0 6px 24px #0007;pointer-events:none; }
+  .workspacePanel[hidden] { display:none!important; }
+  .workspacePanel>.sec:first-child { margin-top:4px; }
+  #pose3dRow { flex-wrap:wrap; } #pose3dRow button { flex:1 1 calc(50% - 7px); }
   /* 立绘选择器：横向滚的缩略条，不竖着堆一堆按钮 */
   #chRow { display:flex; gap:8px; overflow-x:auto; padding:2px 0 6px;
            -webkit-overflow-scrolling:touch; scrollbar-width:thin; }
@@ -205,6 +218,8 @@
   #gateNote { margin-bottom:22px; padding:12px 14px; border-radius:9px; text-align:left;
               background:#141b21; border:1px solid #2a3944; font-size:12.5px; line-height:1.75; color:#9aa7b2; }
   #gateNote b { display:block; margin-bottom:5px; color:#5fd0ff; font-size:13.5px; }
+  #gate #gatePhoto { margin-top:10px; background:#17232d; border-color:#354955; color:#d9e7ed; }
+  #workspaceTabs button:focus-visible, #gate button:focus-visible { outline:2px solid #80d9ef; outline-offset:2px; }
 
   /* 中 / EN 开关。放右上角，和左边那块 HUD 对称 */
   #lang { position:fixed; right:10px; top:calc(10px + env(safe-area-inset-top)); z-index:60;
@@ -216,6 +231,7 @@
 
 <div id="stage">
   <video id="v" playsinline autoplay muted></video>
+  <canvas id="scenePhotoCanvas" hidden></canvas>
   <canvas id="c"></canvas>
 </div>
 
@@ -227,7 +243,7 @@
 
     <!-- ── ① 立绘：最常用的一步，摊在最上面、缩略图也最大 ────────── -->
     <div class="sec" data-t="sec.char">立绘</div>
-    <div class="hint" data-t="hint.char">点一张，她就站进画面</div>
+    <div class="hint" data-t="hint.char">选择内置立绘，或导入本地图片</div>
     <div id="chRow"></div>
     <div class="btns">
       <label class="btn" for="fCh"><span data-t="ch.pick">选本地图片</span></label>
@@ -236,12 +252,18 @@
     <!-- 修图和"选哪张立绘"不是一回事：上面那排是"用谁"，这里是"把手上这张修干净"。
          原来混在一排，看着像是"点了抠图就去挑下一张"。所以单开一个折叠区。 -->
     <button class="fold" id="foldEdit" data-t-title="fold.editTip" aria-expanded="false">
-      <span class="caret" id="caretEdit">▸</span><span data-t="fold.edit">修饰立绘</span></button>
+      <span class="caret" id="caretEdit">▸</span><span data-t="fold.edit">抠图与修边</span></button>
     <div id="editBox" hidden>
+      <div class="row"><label for="segModel" data-t="seg.model">抠图模型</label><select id="segModel" style="flex:1;min-width:0;padding:10px;background:#18232d;color:#e8eef3;border:1px solid #364655;border-radius:8px">
+        <option value="fast" data-t="seg.fast">快速 · 44 MB</option>
+        <option value="anime" selected data-t="seg.anime">精细 · 176 MB</option>
+        <option value="birefnet" data-t="seg.birefnet">复杂背景 · BiRefNet</option>
+      </select></div>
+      <div class="hint" data-t="seg.hint">精细模式适合立绘发丝和透明边缘；BiRefNet 适合复杂背景，处理较慢。</div>
       <div class="btns">
         <button id="cutSolid" data-t="btn.cutSolid">纯色底抠图</button>
-        <button id="cutAi" data-t="btn.cutAi">AI 抠图</button>
-        <button id="cutImport" data-t="btn.cutImport">导入模型</button>
+        <button id="cutAi" data-t="btn.cutAi">智能抠图</button>
+        <button id="cutImport" data-t="btn.cutImport">导入快速模型</button>
         <button id="trimBtn" data-t="btn.trim">自动裁边</button>
         <button id="chReset" data-t="btn.reset">还原</button>
       </div>
@@ -267,8 +289,8 @@
       <span class="caret" id="caret3d">▸</span><span data-t="fold.3d">3D 立绘（MMD）</span></button>
     <div id="d3dBox" hidden>
       <div class="btns">
-        <button id="t3d" data-t="btn.3d">3D 立绘</button>
-        <button id="f3d" data-t="btn.3dFile">导入模型(.zip/.glb)</button>
+        <button id="t3d" data-t="btn.3d">显示 3D</button>
+        <button id="f3d" data-t="btn.3dFile">导入 3D 模型</button>
         <button id="f3dDirBtn" data-t="btn.3dDir">导入文件夹</button>
       </div>
       <!-- ⚠ accept 里必须有 application/octet-stream：**安卓的选择器是按 MIME 过滤的**，
@@ -281,13 +303,21 @@
       <input type="file" id="f3dDir" webkitdirectory directory multiple hidden>
       <!-- 收 .zip 最省事：MMD 模型包下载下来本来就是 zip，里面自带 pmx + 贴图。
            ⚠ 单个 .pmx 也能读，但**贴图是散在外面的**，会是一堆白模 —— 所以界面上先推荐 zip。 -->
-      <div class="hint" data-t="hint.3dFile">收 .zip（推荐）/ .glb / 文件夹（散开的 pmx+贴图）/ 单个 .pmx（会缺贴图）</div>
+      <div class="hint" data-t="hint.3dFile">建议导入含贴图的 ZIP；也支持 GLB、PMX 和模型文件夹。</div>
       <!-- ★ 一个文件夹里常有**好几个** pmx（角色 + 武器 + 部件），贴图全堆在一起。
            以前"挑最大的那个"是在替用户瞎猜，所以这里把包里所有 pmx 列出来让他自己点。 -->
       <div class="sub" id="model3dLabel" data-t="row.model3d" style="display:none">模型</div>
       <div class="btns" id="model3dRow" style="display:none"></div>
       <div class="sub" id="pose3dLabel" data-t="row.pose3d" style="display:none">姿势</div>
       <div class="btns" id="pose3dRow" style="display:none"></div>
+      <div class="btns" id="motion3dRow" style="display:none">
+        <button id="idle3d" type="button" data-t="motion.idle">待机动作</button>
+        <button id="f3dMotion" type="button" data-t="motion.import">导入 VMD 动作</button>
+        <button id="t3dMotion" type="button" disabled data-t="motion.play">播放动作</button>
+      </div>
+      <input type="file" id="f3dMotionFile" accept=".vmd,application/octet-stream" hidden>
+      <div class="hint" id="motion3dNote" style="display:none" data-t="motion.hint">VMD 动作需要匹配模型骨骼，可随时暂停或切回静态姿势。</div>
+      <div class="row" id="material3dRow" style="display:none"><label for="material3d" data-t="material.label">角色材质</label><select id="material3d" style="flex:1;padding:10px;background:#18232d;color:#e8eef3;border:1px solid #364655;border-radius:8px"><option value="toon" data-t="material.toon">卡通</option><option value="physical" data-t="material.physical">写实受光</option></select></div>
       <!-- 主光方向：**故意做成滑块，不假装自动**。方向从一张照片里估不准
            （相机自动曝光一直在动、亮的不等于光源、室内顶灯+窗+墙反光混在一起），
            与其猜错，不如让人自己拖到"影子跟背景对得上"为止。
@@ -301,7 +331,7 @@
       <div class="row" id="focus3dRow" style="display:none"><label data-t="dof.focus">对焦距离</label>
         <input type="range" id="focus3d" min="0.5" max="20" step="0.1" value="4"><output id="ofocus3d">4.0m</output></div>
       <div class="row" id="dof3dRow" style="display:none"><label data-t="dof.amt">虚化强度</label>
-        <input type="range" id="dof3d" min="0" max="1" step="0.05" value="0.45"><output id="odof3d">0.45</output></div>
+        <input type="range" id="dof3d" min="0" max="1" step="0.05" value="0"><output id="odof3d">0.00</output></div>
       <div id="d3dNote" style="display:none;margin-top:6px;font-size:12px;color:#9aa7b2;line-height:1.7"></div>
     </div>
     <div id="chNote" style="display:none;margin-top:6px;font-size:12px;color:#9aa7b2;line-height:1.7"></div>
@@ -342,6 +372,8 @@
     <button class="fold" id="foldCam" data-t-title="fold.camTip" aria-expanded="false">
       <span class="caret" id="caretCam">▸</span><span data-t="fold.cam">相机与距离</span></button>
     <div id="camBox" hidden>
+      <div class="row" id="photoPitchRow" hidden><label data-t="photo.pitch">照片俯角</label><input type="range" id="photoPitch" min="-30" max="65" step="0.5" value="8"><output id="photoPitchValue">8°</output></div>
+      <div class="row" id="photoRollRow" hidden><label data-t="photo.roll">照片倾斜</label><input type="range" id="photoRoll" min="-45" max="45" step="0.5" value="0"><output id="photoRollValue">0°</output></div>
       <div class="row"><label data-t="cam.h">相机高度</label><input type="range" id="h"  min="0.6" max="2.2"  step="0.01" value="1.60"><output id="oh">1.60m</output></div>
       <div class="row"><label data-t="cam.Hp">人物身高</label><input type="range" id="Hp" min="1.10" max="2.00" step="0.01" value="1.65"><output id="oHp">1.65m</output></div>
       <div class="row"><label data-t="cam.d">距离</label>   <input type="range" id="d"  min="0.5" max="20"   step="0.05" value="4.00"><output id="od">4.00m</output></div>
@@ -351,6 +383,8 @@
 
     <!-- ── ③ 取景：出图裁到哪 + 两根辅助线 + 最后"存东西" ─────────── -->
     <div class="sec" data-t="sec.frame">取景</div>
+    <div class="btns"><button id="pickScenePhoto" type="button" data-t="photo.import">导入照片</button><button id="returnCamera" type="button" data-t="photo.camera">打开相机</button></div>
+    <input type="file" id="scenePhotoFile" accept="image/*" hidden>
     <div class="hint" data-t="hint.frame">画幅决定出图裁到哪，网格/人体只是辅助线</div>
     <div class="row"><label data-t="cam.frame">取景框</label><span id="frameRead" style="font-size:12px;color:#9aa7b2"></span></div>
     <div class="btns" id="frameRow"></div>
@@ -366,8 +400,20 @@
     <div class="btns">
       <button id="rotWorld" class="on" data-t="btn.rotWorld">对正世界</button>
       <button id="rotFrame" data-t="btn.rotFrame">对正画面</button>
-      <button id="autoFix" data-t="btn.autoFix">自动摆正</button>
+      <button id="autoFix" data-t="btn.autoFix">对齐构图</button>
     </div>
+    <!-- 输出尺寸：**作品设置**，不是渲染器内部判断。
+         没有这一格的话，"出图多少像素"完全由 2560 的预览代理图决定 ——
+         原图有 6000×4000，出来的还是 2560 宽。 -->
+    <div class="row" id="outSizeRow">
+      <label data-t="out.size">输出尺寸</label>
+      <div class="btns" style="flex:1">
+        <button type="button" id="outAuto" class="on" data-t="out.auto">自动</button>
+        <button type="button" id="out1x" data-t="out.x1">1×</button>
+        <button type="button" id="out2x" data-t="out.x2">2×</button>
+      </div>
+    </div>
+    <div id="outInfo" class="hint" aria-live="polite"></div>
     <div class="btns">
       <button id="exPack" data-t="btn.export">导出素材包</button>
     </div>
@@ -378,8 +424,8 @@
          ⚠ target="_blank" + rel="noopener noreferrer" 一个都不能少：
            外链不带 noopener 会拿到 window.opener，等于把这一页交出去。 -->
     <a id="sponsor" href="https://afdian.com/a/598398jsnsn" target="_blank" rel="noopener noreferrer">
-      <span data-t="sponsor.btn">赞助</span>
-      <span class="spTip" data-t="sponsor.tip">帮忙给网站做更好的升级</span>
+      <span data-t="sponsor.btn">支持开发</span>
+      <span class="spTip" data-t="sponsor.tip">自愿赞助</span>
     </a>
   </div></div>
 
@@ -446,13 +492,13 @@
      按钮照旧能改。放在 #dock **外面**：它是浮层，不占底部那条的高度。
      文案全走 TXT + t()，data-t / data-t-title 各就各位（切语言跟着变）。 -->
 <div id="kind" hidden>
-  <div class="kdTitle" data-t="kind.title">这张立绘是全身还是半身？</div>
+  <div class="kdTitle" data-t="kind.title">选择立绘类型</div>
   <div class="kdRow">
     <button id="kdFull" data-t="kind.full">全身</button>
     <button id="kdHalf" data-t="kind.half">半身</button>
     <button id="kdClose" data-t-title="kind.closeTip">✕</button>
   </div>
-  <div class="kdTip" data-t="kind.tip">全身 = 脚踩地面（贴地）；半身 = 切口压在取景框下边（自由 + 贴下）。选完还能在「摆位」里改</div>
+  <div class="kdTip" data-t="kind.tip">全身默认贴地；半身可以自由移动。之后仍可在「摆位」中调整。</div>
 </div>
 
 <!-- 拖动提示。和 #kind 一样**不在 #dock 里**（放进去会成为 dock 的布局高度，
@@ -464,16 +510,18 @@
        ⚠ 必须是**独立节点** —— gateMsg 会被 gate.fail 覆写成报错文案，
        公告要是塞进同一个节点，一报错就跟着没了。 -->
   <div id="gateNote">
-    <b data-t="gate.noteT">3D 立绘（MMD）测试中</b>
-    <span data-t="gate.noteB">「3D 立绘」现在能直接导入 MMD 模型了 —— 收 .zip（推荐，自带贴图）/ .glb / 散开的文件夹（pmx + 贴图，安卓上多选）/ 单个 .pmx。一个包里有好几个模型时会列出来让你挑，不要的可以「✕ 去掉这个」。模型不能随站点分发，得你自己准备：AI 抠图模型和一批 MMD 模型都在 QQ 群 1121979160 的群文件里 —— 国内从本站下只有 80KB/s，从群里下快得多。</span>
+    <b data-t="gate.noteT">把角色放进画面</b>
+    <span data-t="gate.noteB">拍摄实时画面，或导入一张照片。选择立绘或 3D 模型后，调整位置、光线与取景，再保存结果。</span>
   </div>
-  <div id="gateMsg" data-t="gate.msg">需要授权摄像头和动作传感器</div>
-  <button id="gateBtn" data-t="gate.start">开始</button>
+  <div id="gateMsg" data-t="gate.msg">选择一种开始方式</div>
+  <button id="gateBtn" data-t="gate.start">打开相机</button>
+  <button id="gatePhoto" type="button" data-t="gate.photo">导入照片</button>
 </div></div>
 
 <!-- 两个普通 script，照旧不是 module —— file:// 直接开也得能用。
      ⚠ 路径带 ../：这一页在 phone/ 子目录里；chars.js 里的 file 是相对**站点根目录**的。 -->
 <script src="./cutout.js"></script>
+<script src="./segmentation.js"></script>
 <script src="./chars/chars.js"></script>
 <!-- 3D 立绘运行时（普通 script，内部按需动态 import three.js）。
      ⚠ importmap 必须出现在**任何动态 import 之前**：GLTFLoader.js 里写的是
@@ -507,7 +555,7 @@ function arcSnapshot(){
     mode: S.mode, shot: S.shot, frame: S.frame, charScale: S.charScale,
     Hp: S.Hp, edgeBar: S.edgeBar,
     light: { lum:+LIGHT.lum.toFixed(3), r:+LIGHT.r.toFixed(3), b:+LIGHT.b.toFixed(3), sat:+LIGHT.sat.toFixed(3), ok: LIGHT.ok },
-    on: { light: LIGHT_ON, grain: LIGHT_GRN, shadow: LIGHT_SHD, soften: LIGHT_SFT },
+    on: { light: LIGHT_ON, grain: LIGHT_GRN, shadow: LIGHT_SHD },
     place: c ? { u:+c.u.toFixed(1), v:+c.v.toFixed(1), w:+c.w.toFixed(1), h:+c.h.toFixed(1), rot:+c.rot.toFixed(3) } : null,
     canvas: { w: cv.width, h: cv.height },
     orient: (screen.orientation ? screen.orientation.angle : null),
@@ -553,7 +601,7 @@ function syncTurn(){
   const b = document.body;
   if (!TURN){
     b.style.cssText = '';
-    for (const el of [v, cv]) el.style.transform = 'translate(-50%,-50%)';
+    for (const el of [v, cv, $('scenePhotoCanvas')]) el.style.transform = 'translate(-50%,-50%)';
   } else {
     // 先摆成"逻辑尺寸"再转 90° 居中 —— 转完正好盖满竖屏幕
     b.style.position = 'fixed';
@@ -577,7 +625,7 @@ function syncTurn(){
     //        所以这里要 rotate(-TURN) 把它抵消回原样。
     //   之前只转 body：UI 正了、世界层被多转了 90°，
     //   真机上就是"横着拿 UI 是横的、里面的世界却是竖的"（地平线立起来、骨架躺倒）。
-    for (const el of [v, cv]) el.style.transform = `translate(-50%,-50%) rotate(${-TURN}deg)`;
+    for (const el of [v, cv, $('scenePhotoCanvas')]) el.style.transform = `translate(-50%,-50%) rotate(${-TURN}deg)`;
   }
   // ⚠ 画布**故意不在这里重算** —— 回滚自 2026-09-17 的那次改动。
   //   我改成 `if (fitNow) fitNow()` 之后真机上出现「横过来骨骼不跟着动、看着是反的」：
@@ -592,6 +640,7 @@ function syncTurn(){
 
 const $ = id => document.getElementById(id);
 const v = $('v'), cv = $('c'), ctx = cv.getContext('2d');
+let scenePhoto = null, cameraFitHandler = null;
 
 // ── 语言 ──────────────────────────────────────────────────────────
 /**
@@ -617,7 +666,7 @@ const TXT = {
   'btn.shadow':   ['接触阴影', 'Contact shadow'],
   'btn.rotWorld': ['对正世界', 'Align to world'],
   'btn.rotFrame': ['对正画面', 'Align to frame'],
-  'btn.autoFix':  ['自动摆正', 'Auto-frame'],
+  'btn.autoFix':  ['对齐构图', 'Align composition'],
   'btn.body':     ['人体', 'Figure'],
   'btn.shot':     ['拍照', 'Shoot'],
   // 快门只出照片；三个文件的包挪到这个按钮里，点了才打 zip
@@ -630,14 +679,14 @@ const TXT = {
   'sec.frame':    ['取景', 'Framing'],
   'sec.place':    ['摆位', 'Placement'],
   // 每组一句话：面板一展开不该是"参数墙"，得先知道这组是干嘛的、下一步点哪
-  'hint.char':    ['点一张，她就站进画面', 'Tap one and she steps into the frame'],
+  'hint.char':    ['选择内置立绘，或导入本地图片', 'Choose a character or import an image'],
   'hint.place':   ['全身用贴地，半身用自由', 'Full body → On ground, half body → Free'],
   'hint.frame':   ['画幅决定出图裁到哪，网格 / 人体只是辅助线',
                    'The aspect decides the crop; grid and figure are guides only'],
   'ch.pick':      ['选本地图片', 'Local image'],
   'btn.cutSolid': ['纯色底抠图', 'Cut solid bg'],
-  'btn.cutAi':    ['AI 抠图', 'AI cutout'],
-  'btn.cutImport':['导入模型', 'Import model'],
+  'btn.cutAi':    ['智能抠图', 'AI cutout'],
+  'btn.cutImport':['导入快速模型', 'Import fast model'],
   'btn.trim':     ['自动裁边', 'Auto-trim'],
   'btn.reset':    ['还原', 'Reset'],
   'mode.ground':  ['贴地', 'On ground'],
@@ -647,9 +696,9 @@ const TXT = {
   'row.scale':    ['大小系数', 'Size factor'],
   // 折叠区。修图（抠图/裁边/还原）和"选立绘"是两件事，收起来；相机那 5 根
   // 滑条是细调，也收起来 —— 两处都默认收起，▸ 是收、▾ 是开。
-  'fold.edit':    ['修饰立绘', 'Retouch'],
-  'fold.editTip': ['抠图 / 裁边 / 还原 —— 把手上这张立绘修干净（不是换一张）',
-                   'Cut out / trim / reset — clean up the art you already picked (does not switch art)'],
+  'fold.edit':    ['抠图与修边', 'Cutout & edges'],
+  'fold.editTip': ['处理当前图片的背景、边缘和透明留白',
+                   'Remove the background, refine edges and trim transparent margins'],
   'fold.cam':     ['相机与距离', 'Camera & distance'],
   'fold.camTip':  ['相机高度 / 人物身高 / 距离 / 横向 / 等效焦距 —— 细调，不是第一步',
                    'Camera height / subject height / distance / lateral / focal length — fine tuning, not step one'],
@@ -657,13 +706,61 @@ const TXT = {
   // 3D 立绘（MMD）。
   // ⚠ 模型不随站点分发（MMD 模型普遍禁止二次配布），所以只有"本地导入"这一条路。
   'fold.3d':      ['3D 立绘（MMD）', '3D character (MMD)'],
-  'fold.3dTip':   ['用真透视把 MMD 模型摆进画面：脚踩地面、影子落地、俯仰跟着走（景别不适用，模型本来就是全身）',
-                   'Placed with a real perspective camera: feet on the ground, cast shadow, follows pitch/roll (shot framing does not apply — the model is full body)'],
-  'btn.3d':       ['3D 立绘', '3D character'],
-  'btn.3dFile':   ['导入模型(.zip/.glb)', 'Import model (.zip/.glb)'],
+  'fold.3dTip':   ['导入 PMX、ZIP 或 GLB 模型，并调整姿势、动作和光照',
+                   'Import PMX, ZIP or GLB models and adjust pose, motion and lighting'],
+  'btn.3d':       ['显示 3D', 'Show 3D'],
+  'btn.3dFile':   ['导入 3D 模型', 'Import 3D model'],
   'btn.3dDir':    ['导入文件夹', 'Import folder'],
-  'hint.3dFile':  ['收 .zip（推荐）/ .glb / 文件夹（散开的 pmx+贴图）/ 单个 .pmx（会缺贴图）',
-                   'Accepts .zip (best) / .glb / a folder (loose pmx + textures) / a lone .pmx (no textures)'],
+  'hint.3dFile':  ['建议导入含贴图的 ZIP；也支持 GLB、PMX 和模型文件夹。',
+                   'A ZIP with textures works best. GLB, PMX and model folders are also supported.'],
+  'seg.model':    ['抠图模型', 'Cutout model'],
+  'seg.fast':     ['快速 · 44 MB', 'Fast · 44 MB'],
+  'seg.anime':    ['精细 · 176 MB', 'Detailed · 176 MB'],
+  'seg.birefnet': ['复杂背景 · BiRefNet', 'Complex background · BiRefNet'],
+  'seg.nativeOnly':['BiRefNet · 仅限 Android', 'BiRefNet · Android only'],
+  'seg.hint':     ['精细模式适合立绘发丝和透明边缘；BiRefNet 适合复杂背景，处理较慢。',
+                   'Detailed mode preserves hair and soft edges. BiRefNet handles complex backgrounds more slowly.'],
+  'motion.idle':  ['待机动作', 'Idle animation'],
+  'motion.import':['导入 VMD 动作', 'Import VMD motion'],
+  'motion.play':  ['播放动作', 'Play motion'],
+  'motion.pause': ['暂停动作', 'Pause motion'],
+  'motion.resume':['继续动作', 'Resume motion'],
+  'motion.hint':  ['VMD 动作需要匹配模型骨骼，可随时暂停或切回静态姿势。',
+                   'VMD motion needs compatible bones. You can pause or return to a static pose.'],
+  'motion.idleNote':['正在播放待机动作。', 'Idle animation is playing.'],
+  'motion.staticNote':['已切回静态姿势。', 'Returned to a static pose.'],
+  'motion.needModel':['请先导入 3D 模型。', 'Import a 3D model first.'],
+  'motion.matching':['正在匹配骨骼…', 'Matching bones…'],
+  'motion.loaded':['已载入 {0}，匹配 {1} 条动作轨道。', 'Loaded {0}; matched {1} motion tracks.'],
+  'material.label':['角色材质', 'Character material'],
+  'material.toon':['卡通', 'Toon'],
+  'material.physical':['写实受光', 'Scene lighting'],
+  'material.loading':['正在切换材质…', 'Switching material…'],
+  'material.fail':['材质切换失败', 'Could not switch material'],
+  'photo.pitch':  ['照片俯角', 'Photo pitch'],
+  'photo.roll':   ['照片倾斜', 'Photo tilt'],
+  'photo.import': ['导入照片', 'Import photo'],
+  'photo.camera': ['打开相机', 'Open camera'],
+  'photo.fail':   ['照片导入失败：{0}', 'Photo import failed: {0}'],
+  'fusion.title':['场景融合', 'Scene blending'],
+  'fusion.hint': ['按环境光调整角色，再微调边缘和阴影。半身立绘不添加脚底阴影。',
+                   'Match the character to the scene, then refine edges and shadows. Half portraits have no foot shadow.'],
+  'fusion.strength':['2D 融合强度', '2D blend strength'],
+  'fusion.detail':['有效立绘 {0}×{1} · 输出缩放 {2}×', 'Subject {0}×{1} · output scale {2}×'],
+  'fusion.enlarged':['当前正在放大显示，换用高清立绘会更清晰。', 'Enlarged beyond native resolution. A higher-resolution source will look clearer.'],
+  'fusion.sourceScaled':['（原图 {0}×{1}，编辑用的是缩小后的版本）',
+                         ' (source {0}×{1}; editing on a downscaled copy)'],
+  'out.size':['输出尺寸', 'Output size'],
+  'out.auto':['自动', 'Auto'],
+  'out.x1':['1×', '1×'],
+  'out.x2':['2×', '2×'],
+  'out.info':['输出 {0}×{1} · 人物放大 {2}×', 'Output {0}×{1} · subject upscaled {2}×'],
+  'out.infoHi':['输出 {0}×{1} · 人物按原图重算', 'Output {0}×{1} · subject recomposed from source'],
+  'out.limitSource':['（已到原图上限）', ' (at source limit)'],
+  'out.limitBudget':['（受内存上限限制）', ' (limited by memory budget)'],
+  'out.video':['实时相机只有视频帧分辨率，出图按预览尺寸。',
+               'Live camera is limited to the video frame; output matches the preview size.'],
+  'fusion.shadow':['脚底阴影强度', 'Foot shadow strength'],
   'row.pose3d':   ['姿势', 'Pose'],
   'row.model3d':  ['模型', 'Model'],
   'btn.modelDrop':['✕ 去掉这个', '✕ Remove this one'],
@@ -673,29 +770,28 @@ const TXT = {
   'light.el':     ['主光高度', 'Key light elevation'],
   'dof.focus':    ['对焦距离', 'Focus distance'],
   'dof.amt':      ['虚化强度', 'Defocus amount'],
-  'note.3dNeedModel': ['还没导入模型 —— 点「导入模型(.zip/.glb)」（模型不能随站点分发，得你自己拿）',
-                       'No model yet — tap "Import model (.zip/.glb)" (models cannot be redistributed with the site)'],
+  'note.3dNeedModel': ['请先导入 3D 模型。建议使用含贴图的 ZIP。',
+                       'Import a 3D model first. A ZIP with textures works best.'],
   'note.3dNoEngine':  ['3D 引擎没载入 —— 需通过 http(s) 打开这一页（和 AI 抠图同一条限制）',
                        'The 3D engine did not load — this page must be opened over http(s) (same limit as AI cut-out)'],
   'note.3dLoading':   ['载入 3D 模型…', 'Loading 3D model…'],
   'note.3dFail':      ['3D 载入失败：{0}', '3D load failed: {0}'],
-  'note.3dOk':        ['3D 就位：{0}（{1} 面 / {2} 骨骼 / {3} 个姿势）。镜头拖动和滑条照旧管用，落位由相机解出来。',
-                       '3D ready: {0} ({1} tris / {2} bones / {3} poses). Camera controls and sliders still apply; placement is solved by the camera.'],
+  'note.3dOk':        ['已载入 {0} · {1} 面 · {2} 骨骼 · {3} 姿势',
+                       'Loaded {0} · {1} faces · {2} bones · {3} poses'],
   // ⚠ 只导 .pmx（没带贴图）时这里必须**说清楚是白模**：PMX 里"引用了 18 张贴图"，
   //   所以按钮/统计看着一切正常，屏幕上却是一片白 —— 用户完全不知道差在哪一步。
-  'note.3dTexMiss':   ['⚠ 贴图只找到 {0}/{1} 张，会是白模。先点一次「导入文件夹」（把那个文件夹记住），之后丢任意 .pmx 进来都会自动配上；或直接导入整个 .zip。',
-                       '⚠ Only {0}/{1} textures found — the model will be white. Tap "Import folder" once (I will remember it) and any .pmx you pick afterwards gets its textures automatically; or just import the whole .zip.'],
-  'note.3dTexPool':   ['贴图 {0} 张是从上次导入的文件夹里**自动**配上的 —— 以后丢 pmx 进来都这样。',
-                       '{0} textures auto-matched from the folder you imported earlier — picking a .pmx works like this from now on.'],
-  'note.3dDrawFail':  ['⚠ 绘制出错（画面会停住）：{0} —— 这是我这边的问题，把这句话发我。',
-                       '⚠ Draw error (the view will freeze): {0} — this is a bug on my side, please send me this line.'],
+  'note.3dTexMiss':   ['仅找到 {0}/{1} 张贴图。请导入完整 ZIP，或选择包含贴图的文件夹。',
+                       'Found {0}/{1} textures. Import the full ZIP or a folder containing the textures.'],
+  'note.3dTexPool':   ['已从导入的文件夹匹配 {0} 张贴图。',
+                       'Matched {0} textures from the imported folder.'],
+  'note.3dDrawFail':  ['3D 绘制失败：{0}', '3D rendering failed: {0}'],
 
   // 景别：这张立绘是从人身上哪一段切的。
   // ⚠ 值（'全身' 这种中文）和 studio.html 的 SHOTS 共用，两边必须一致；
   //   这里翻的只是按钮上显示的字，存档和 scene.json 里存的仍是中文。
   'place.shot':   ['景别', 'Shot'],
-  'place.shotTip':['这张立绘从人身上哪一段切下来的 —— 贴地时它决定下沿落在哪个高度（半身立绘必选）',
-                   'Where this art is cut on the body — on-ground it sets the height of the bottom edge (pick this for half-body art)'],
+  'place.shotTip':['选择立绘显示到身体的哪个部位',
+                   'Choose how much of the character is shown'],
   'shot.全身':    ['全身', 'Full body'],
   'shot.膝上':    ['膝上', 'Above knee'],
   'shot.腰上':    ['腰上', 'Above waist'],
@@ -705,10 +801,8 @@ const TXT = {
   // 框条吸附。⚠ 值（'贴上' 这种中文）和 studio.html 的 EDGES 共用，两边必须一致；
   //   这里翻的只是按钮上显示的字，scene.json 里存的仍是 bar 的编号（0~4）。
   'place.edge':   ['贴边', 'Snap to edge'],
-  'place.edgeTip':['半身立绘把切口那条边吸到取景框的一条边上，沿那条边随便滑（居中、靠上、靠下都行）'
-                   + ' —— 切口离开画框就成了一截悬空的身子',
-                   'Snap the cut edge of a half-body portrait onto one frame edge, then slide anywhere along it '
-                   + '(centered, high, low) — a cut edge that leaves the frame becomes a floating torso'],
+  'place.edgeTip':['将立绘边缘吸附到取景框边缘',
+                   'Snap the character to an edge of the frame'],
   'edge.不贴边':  ['不贴边', 'No snap'],
   'edge.贴上':    ['贴上', 'Snap top'],
   'edge.贴下':    ['贴下', 'Snap bottom'],
@@ -729,16 +823,14 @@ const TXT = {
   'live.moveYTip': ['上下挪位置（只挪位置，不改大小）', 'Move up/down (position only)'],
   'live.size':    ['大小', 'Size'],
   'live.scale':   ['大小', 'Size'],
-  'live.sizeTip': ['自由模式：立绘占画面高的百分比（拖动只改大小，不挪位置）',
-                   'Free mode: character height as a share of the frame (dragging resizes only, never moves it)'],
-  'live.scaleTip':['贴地模式：纯大小系数 —— 只改立绘多大，位置一个像素都不动（1.00× = 投影算出来的原大小）',
-                   'On-ground mode: a pure size factor — resizes only, the position does not move a pixel (1.00× = the projected size)'],
+  'live.sizeTip': ['调整立绘在画面中的高度', 'Adjust character height in the frame'],
+  'live.scaleTip':['调整贴地立绘的大小，不改变落脚点',
+                   'Resize the grounded character without moving its feet'],
   // 这一格千万别当成镜头变焦：它只改投影，相机画面一个像素都不动
-  'live.feqTip':  ['投影焦距，不是镜头变焦 —— 只改立绘/网格落在哪、多大，摄像头画面不动',
-                   'Projection focal length, not lens zoom — it only moves and scales the character and grid; the camera image is untouched'],
+  'live.feqTip':  ['调整角色与网格的透视，不改变相机画面',
+                   'Adjust character and grid perspective without zooming the camera'],
   'live.zoom':    ['变焦', 'Zoom'],
-  'live.zoomTip': ['真·相机变焦，量程由这台设备报的 caps.zoom 决定',
-                   'Real camera zoom; the range comes from this device\'s caps.zoom'],
+  'live.zoomTip': ['调整摄像头画面的变焦倍数', 'Adjust the camera zoom'],
   'live.zoomFail':['这颗镜头调不了变焦', 'This camera cannot zoom'],
 
   // 立绘状态 / 报错
@@ -748,9 +840,11 @@ const TXT = {
   'note.autoCut': ['自动抠掉了 {0}% 的纯色底', 'Auto-removed {0}% solid background'],
   'note.autoTrim':['自动裁掉了四周的空白边', 'Auto-trimmed the empty margin'],
   'note.autoSoft':['软边整理（把残留底色收掉、边做软）', 'Edge cleanup (fringe removed, edge softened)'],
-  'note.autoBlur':['补了一点镜头微糊（和照片的锐度对齐）', 'Added a touch of lens softness (to match the photo)'],
-  'note.halfAuto':['看着像半身（下沿被画面切断），已先按半身摆；不对就在上面改',
-                   'Looks like a half-body cut (bottom edge is cut off) — placed as half body; change it above if wrong'],
+  'note.halfAuto':['已识别为半身立绘，可在「摆位」中更改。',
+                   'Detected as a half-body character. Change this under Placement if needed.'],
+  'note.aiStale': ['已切换图片，旧抠图结果已忽略。',
+                   'Image changed; the previous cutout result was ignored.'],
+  'motion.fail': ['动作导入失败。', 'Could not import motion.'],
   'hud.nochar':   ['还没选立绘', 'No character yet'],
   'note.chFail':  ['这张图读不出来', 'Could not read that image'],
   'note.chNone':  ['先在上面选一张立绘', 'Pick a character above first'],
@@ -762,9 +856,9 @@ const TXT = {
   'note.aiProg':  ['AI 抠图：{0} {1}%', 'AI cutout: {0} {1}%'],
   // 总长不可信时（线上 gzip）改报已收多少 MB —— 见 cutai 那段注释
   'note.aiBytes': ['AI 抠图：{0} 已收 {1} MB', 'AI cutout: {0} — {1} MB received'],
-  'note.aiStall': ['网络好像不动了', 'network seems stalled'],
-  'note.aiDone':  ['AI 抠图完成，前景 {0}%，用了 {1} 秒', 'AI cutout done — {0}% subject in {1}s'],
-  'note.aiNothing':['AI 没认出前景（可能不是立绘，或者图太小）', 'AI found no subject'],
+  'note.aiStall': ['下载暂无进度，请检查网络', 'Download has stalled. Check the connection'],
+  'note.aiDone':  ['抠图完成 · 前景 {0}% · {1} 秒', 'Cutout complete · {0}% subject · {1}s'],
+  'note.aiNothing':['未检测到清晰前景，请换图或尝试其他模型', 'No clear subject found. Try another image or model'],
   'note.aiFail':  ['AI 抠图失败：{0}', 'AI cutout failed: {0}'],
   // 导入模型
   'note.impPick': ['选你下好的模型文件（.onnx，或者压过的 .onnx.gz 都行）',
@@ -775,15 +869,13 @@ const TXT = {
   'note.impFail': ['导入失败：{0}', 'Import failed: {0}'],
   'note.impNone': ['这个浏览器不支持导入（缺 file / IndexedDB）', 'This browser can\'t import (no file / IndexedDB support)'],
   // AI 抠图的模型从哪儿拿。群号是写死的，换群记得改这儿（中英各一处）。
-  'note.aiSrc': ['AI 抠图模型（42MB）放在 QQ 群 1121979160 的群文件里。从群里下比从这儿下快得多 —— 下好点上面「导入模型」选它，以后不用再下。',
-                 'The AI cutout model (42MB) lives in the file section of QQ group 1121979160. Downloading it there is much faster than from this site — then tap "Import model" above and pick the file. No download needed after that.'],
+  'note.aiSrc': ['图片在本机处理。动漫精细模式适合立绘；复杂背景可在 Android 本机引擎中使用 BiRefNet。',
+                 'Images are processed locally. Anime precision preserves illustration details; BiRefNet uses the native Android engine.'],
   // ⚠ 别再叫人「去用 AI 抠图」：AI 抠图是 PC 融图台那条路，这一版根本不发它
   //   （vision/ 那 18MB 整个不进包）。提示指向一个页面上不存在的功能，等于把人晾在那儿 ——
   //   和之前那句「去装 adb」是同一类错：文案还停留在旧版的功能集上。
-  'note.notSolid':['四角颜色不一致，或本来就是透明底 —— 没动它。'
-                 + '这张的底色不是纯色，得先用别的工具抠干净再传。',
-                   'Corners differ, or it is already transparent — left untouched. '
-                 + 'The background is not a solid colour; clean it up with another tool first.'],
+  'note.notSolid':['背景颜色不统一，未执行纯色抠图。可尝试智能抠图。',
+                   'The background is not uniform. Try AI cutout instead.'],
   'note.trimmed': ['裁边：{0}×{1} → {2}×{3}', 'Trimmed: {0}×{1} → {2}×{3}'],
   'note.noMargin':['四周没有多余的透明边距', 'No transparent margin to trim'],
   'note.allTrans':['整张图都是透明的，没东西可裁', 'The whole image is transparent — nothing to trim'],
@@ -794,19 +886,17 @@ const TXT = {
   // 全身 / 半身。导入之后弹一次的二选一 —— 它只定**默认走哪条路**：
   // 全身踩地（贴地），半身切口压在取景框边上（自由 + 贴下）。
   // 之后「摆位」里的贴地/自由、景别、贴边照旧能改，所以文案里点明"还能改"。
-  'kind.title':   ['这张立绘是全身还是半身？', 'Is this art full body or half body?'],
+  'kind.title':   ['选择立绘类型', 'Choose character type'],
   'kind.full':    ['全身', 'Full body'],
   'kind.half':    ['半身', 'Half body'],
   'kind.closeTip':['不选，保持现状（立绘照旧能用）', 'Skip — keep the current setup (the character stays usable)'],
-  'kind.tip':     ['全身 = 脚踩地面（贴地）；半身 = 切口压在取景框下边（自由 + 贴下）。选完还能在「摆位」里改',
-                   'Full body = feet on the ground (on-ground); half body = the cut edge sits on the frame edge '
-                   + '(free + snap bottom). You can change it later under Placement'],
-  'kind.doneFull':['全身：脚踩地面 —— 已设为「贴地」+ 景别全身，之后在「摆位」里还能改',
-                   'Full body: feet on the ground — set to On ground with the Full body shot; changeable under Placement'],
+  'kind.tip':     ['全身默认贴地；半身可以自由移动。之后仍可在「摆位」中调整。',
+                   'Full body starts on the ground. Half body can be moved freely. Adjust either under Placement.'],
+  'kind.doneFull':['已按全身立绘设置贴地摆位。', 'Ground placement set for the full-body character.'],
   // ⚠ 文案必须跟着行为走。原来这句写的是"切口贴下边"，但半身**已经不再自动贴边**了 ——
   //   留着就是骗人（用户按回执去找贴边效果，找不到）。
-  'kind.doneHalf':['半身：已设为「自由」+ 占画面高 60%，位置随便拖 —— 想贴边在「贴边」里自己点',
-                   'Half body: Free + 60% frame height. Drag it anywhere; use Snap if you want an edge'],
+  'kind.doneHalf':['已按半身立绘设置自由摆位，可拖动调整。',
+                   'Free placement set for the half-body character. Drag to adjust it.'],
 
   // 画面上的拖动提示（几秒后自己淡出，不是控件）。
   // studio.html 里有一行「画面上拖动挪立绘」，手机页一直没搬过来 ——
@@ -828,20 +918,21 @@ const TXT = {
 
   // HUD / 画面上的字
   'hud.line1':    ['俯角 <b>{0}°</b>　滚转 <b>{1}°</b>', 'Pitch <b>{0}°</b>　roll <b>{1}°</b>'],
-  'hud.line2':    ['预览 <b>{0}×{1}</b>　f=<b>{2}px</b>', 'Preview <b>{0}×{1}</b>　f=<b>{2}px</b>'],
-  'hud.person':   ['人在画面高 <b>{0}%</b>', 'Person is <b>{0}%</b> of frame height'],
+  'hud.line2':    ['画面 <b>{0}×{1}</b>', 'Frame <b>{0}×{1}</b>'],
+  'hud.person':   ['人物约占画面 <b>{0}%</b>', 'Character fills about <b>{0}%</b> of the frame'],
   'hud.behind':   ['人物在相机后方', 'Subject is behind the camera'],
   'read.frame':   ['出图 {0}×{1}', 'Output {0}×{1}'],
   'horizon':      ['地平线', 'Horizon'],
 
   // 闸门 / 报错
-  'gate.noteT':   ['3D 立绘（MMD）测试中', '3D character (MMD) in testing'],
+  'gate.noteT':   ['把角色放进画面', 'Place a character in your scene'],
   // ⚠ 公告里必须带 QQ 群号。站内下载国内只有 80KB/s，从群里拿是**绝大多数人**
   //   唯一走通的路径 —— 藏在「修饰立绘」面板里没人会翻到。
-  'gate.noteB':   ['「3D 立绘」现在能直接导入 MMD 模型了 —— 收 .zip（推荐，自带贴图）/ .glb / 散开的文件夹（pmx + 贴图，安卓上多选）/ 单个 .pmx。一个包里有好几个模型时会列出来让你挑，不要的可以「✕ 去掉这个」。模型不能随站点分发，得你自己准备：AI 抠图模型和一批 MMD 模型都在 QQ 群 1121979160 的群文件里 —— 国内从本站下只有 80KB/s，从群里下快得多。',
-                   '"3D character" can now load MMD models directly — .zip (best, textures included) / .glb / a loose folder (pmx + textures; multi-select on Android) / a lone .pmx. When a pack contains several models they are listed for you to pick, and you can remove the ones you do not want. Models cannot be redistributed with this site, so bring your own: the AI cutout model and a set of MMD models are in the file section of QQ group 1121979160 — this site serves only ~80KB/s from mainland China, the group is far faster.'],
-  'gate.msg':     ['需要授权摄像头和动作传感器', 'Camera and motion sensor access required'],
-  'gate.start':   ['开始', 'Start'],
+  'gate.noteB':   ['拍摄实时画面，或导入一张照片。选择立绘或 3D 模型后，调整位置、光线与取景，再保存结果。',
+                   'Use the live camera or import a photo. Choose a character or 3D model, then adjust placement, lighting and framing.'],
+  'gate.msg':     ['选择一种开始方式', 'Choose how to start'],
+  'gate.start':   ['打开相机', 'Open camera'],
+  'gate.photo':   ['导入照片', 'Import photo'],
   'gate.opening': ['正在打开摄像头和传感器…', 'Opening camera and sensors…'],
   // ⚠ 失败提示必须**分情况**。原来只有一条，写死了"必须通过 http://localhost 打开（adb reverse）"——
   //   那是本机安卓调试的口诀，却会打给任何一个失败的人看：朋友的 iPhone 在美国走 HTTPS 报权限被拒，
@@ -853,16 +944,10 @@ const TXT = {
                    '<span class="err">Not a secure context</span><br><br>'
                  + 'The camera and motion sensors only work over <b>https://</b> or <b>http://localhost</b>. '
                  + 'The current address is http://, so the browser refuses.'],
-  'gate.failDenied': ['<span class="err">权限被拒</span><br><br>'
-                 + '① 别在聊天软件里点开（微信/QQ/Discord 的内置浏览器不给摄像头）—— 复制链接到 '
-                 + '<b>Safari</b> 或 <b>Chrome</b> 打开。<br>'
-                 + '② iPhone：设置 → Safari → 摄像头，改成"允许"。<br>'
-                 + '③ 地址栏左边那个锁/相机图标点开，把摄像头权限改成允许，然后刷新重来。',
-                   '<span class="err">Permission denied</span><br><br>'
-                 + '① Do not open it inside a chat app (WeChat / Discord in-app browsers block the camera) — '
-                 + 'copy the link into <b>Safari</b> or <b>Chrome</b>.<br>'
-                 + '② iPhone: Settings → Safari → Camera → Allow.<br>'
-                 + '③ Tap the lock/camera icon in the address bar, allow the camera, then reload.'],
+  'gate.failDenied': ['<span class="err">无法使用相机</span><br><br>'
+                 + '请检查浏览器或系统的相机权限，然后重试。也可以选择「导入照片」继续。',
+                   '<span class="err">Camera unavailable</span><br><br>'
+                 + 'Check camera permission in your browser or device settings, then retry. You can also import a photo.'],
   'gate.fail':    ['<span class="err">失败：{0} — {1}</span>',
                    '<span class="err">Failed: {0} — {1}</span>'],
 
@@ -872,7 +957,15 @@ const TXT = {
   'note.savedShare': ['已通过分享保存', 'Saved via share'],
   'note.savedPicker': ['已保存', 'Saved'],
   'note.savedDownload': ['已下载', 'Downloaded'],
+  'note.savedNative': ['已保存到系统下载目录 ARView', 'Saved to Downloads/ARView'],
+  'note.savedNativeLegacy': ['已保存到应用文件目录', 'Saved to app files'],
   'note.savedCancel': ['已取消', 'Cancelled'],
+  'note.3dTexList': ['缺失：{0}', 'Missing: {0}'],
+  'note.3dTexDup': ['包里有 {0} 组同名贴图，每组只取了一个。',
+                    '{0} texture name(s) appear in more than one folder; only one of each was used.'],
+  'note.savedFailed': ['保存失败', 'Save failed'],
+  'note.savedFailedHint': ['文件没有写入。可以重试，或改用浏览器下载。',
+                           'Nothing was written. Retry, or save via the browser instead.'],
   // 一份 zip 里固定三层：合成图 + 立绘层 + 配方。回执里点名，
   // 用户才知道解出来那张透明 PNG 是干嘛的、能往哪叠。
   'note.savedMany': ['{0} {1}（{2} 个：照片 + 立绘层 + 配方）',
@@ -881,8 +974,8 @@ const TXT = {
   'note.shotFail': ['出图失败，再按一次试试。', 'Capture failed — press shoot again.'],
 
   // 赞助（爱发电）。和 studio.html 同一条链接、同一份文案。
-  'sponsor.btn':  ['赞助', 'Sponsor'],
-  'sponsor.tip':  ['帮忙给网站做更好的升级', 'Help fund better upgrades for this site'],
+  'sponsor.btn':  ['支持开发', 'Support development'],
+  'sponsor.tip':  ['自愿赞助', 'Optional contribution'],
 };
 
 /**
@@ -923,6 +1016,11 @@ const S = { h:1.6, Hp:1.65, d:4.0, x:0, feq:23, pitch:0, roll:0,
             // 「自由」那种裁法横屏时把画面裁成一条，全身塞不进去；
             // 可见区那块被常驻条压住的部分，靠 UI 半透明让你看得见（见 CSS）。
             grid:true, body:true, ready:false, frame:'满幅',
+            // ★ 作品裁切是**数据**，不是"当前可见区"的副产品（方案 §9.2 / UI-03）。
+            //   cropAr：这一档画幅用的宽高比；-1 = 满幅（整块画布）；0/undefined = 自由（取选它那一刻的视口形状）。
+            //   cropNorm：归一化裁切矩形，只在"换画幅"或"换画布尺寸"时重算。
+            //   面板开合、抽屉高度、窗口缩放、系统字号 —— 一个都不许改它。
+            cropAr:-1, cropNorm:{x:0,y:0,w:1,h:1},
             // 立绘摆放：'ground' = 贴地（默认，全身立绘用），'free' = 自由（半身用）
             mode:'ground', sizePct:60,
             // 景别：这张立绘从人身上哪一段切的。老存档没有这一项 ——
@@ -1020,22 +1118,49 @@ function snapRect(){
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
+/** 视口形状。**只看窗口本身**，不扣常驻条/抽屉 —— 那是 UI，不是构图。 */
+function viewportAspect(){
+  const w = innerWidth, h = innerHeight;
+  return (w > 0 && h > 0) ? w / h : 1;
+}
+
+/**
+ * 按 S.cropAr 重算归一化裁切矩形。
+ * 只在这两种时候调用：**换画幅**、**换画布尺寸**（新照片/相机起流）。
+ * 面板开合、抽屉高度、窗口缩放都不调它 —— 这正是 UI-03 要的那条不变量。
+ */
+function reframeCrop(){
+  const W = cv.width || 1, H = cv.height || 1;
+  const ar = S.cropAr;
+  if (!(ar > 0)){ S.cropNorm = { x:0, y:0, w:1, h:1 }; return; }   // 满幅
+  let w, h;
+  if (W / H > ar){ h = 1; w = (H * ar) / W; }   // 画布比画幅"更宽" → 高度占满
+  else            { w = 1; h = W / ar / H; }    // 画布比画幅"更高" → 宽度占满
+  S.cropNorm = { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
+}
+
+/** 换画幅：唯一会改 S.cropAr 的入口 */
+function setFrame(name){
+  if (!(name in FRAMES)) return;
+  S.frame = name;
+  const ar0 = FRAMES[name];
+  // 「自由」= 选它的**那一刻**的视口形状；之后再怎么开合面板都不变。
+  S.cropAr = (ar0 === -1) ? -1 : (ar0 || viewportAspect());
+  reframeCrop();
+  renderFrameRow();
+}
+
+/**
+ * 出图裁切 = S.cropNorm × 画布尺寸。
+ * ⚠ 不再读 viewRect()。原来它是"在看得见的那块里取内接矩形"，
+ *   于是**展开底部面板**就会改变出图裁切 —— 用户看到的框没动，照片却被多裁/少裁了一块。
+ *   现在裁切只在换画幅或换画布时变；可见区只影响**显示**和**贴边吸附**（snapRect）。
+ * 宽高保持精确（画幅比例不能因为取整就歪），原点取整（见 viewRect 那条注释）。
+ */
 function frameRect(){
-  // 满幅：整块画布，**不**先缩进可见区。
-  // 这一条是给「拍全身」用的 —— 别的画幅都只能长在看得见的那块里，
-  // 横屏时那块很扁（手机没开自动旋转、软转屏之后看得见的就是一条竖长条，
-  // 开了自动旋转则是一条横扁条），出图照着框一裁更扁，人整个塞不进去。
-  // 代价：框边会伸到屏幕外 —— **出图**裁到框外没问题（那是照片的一部分），
-  // 但**贴边吸附**不能吸到那些边（吸了就看不见人在哪）。
-  // 所以吸附另走 snapRect()（= 这份框 ∩ 看得见的那块），出图仍然用这份。
-  if (FRAMES[S.frame] === -1) return { x:0, y:0, w:cv.width, h:cv.height };
-  const V = viewRect();
-  const ar = FRAMES[S.frame] || 0;
-  if (!ar) return V;
-  let w = V.w, h = w/ar;
-  if (h > V.h){ h = V.h; w = h*ar; }
-  // 宽高保持精确（画幅比例不能因为取整就歪），原点取整（见 viewRect 那条注释）
-  return { x: Math.round(V.x + (V.w-w)/2), y: Math.round(V.y + (V.h-h)/2), w, h };
+  const n = S.cropNorm || { x:0, y:0, w:1, h:1 };
+  const W = cv.width, H = cv.height;
+  return { x: Math.round(n.x * W), y: Math.round(n.y * H), w: n.w * W, h: n.h * H };
 }
 
 // ── 投影（与桌面验证器同一套公式，已验证往返误差 3.6e-15）──────────
@@ -1067,6 +1192,7 @@ function project(x, y, d) {
 //   只记一边的话，回家只能看到一个数，没法判谁错。
 let arcOrientTick = 0;
 function onOrient(e) {
+  if (scenePhoto) return;
   if (e.alpha == null || e.beta == null || e.gamma == null) return;
   if ((arcOrientTick++ % 4) === 0){
     arcLog('orient', { pitch:+S.pitch.toFixed(2), roll:+S.roll.toFixed(2),
@@ -1129,7 +1255,7 @@ function onOrient(e) {
  *   ② 强度封顶 65% —— 靠满 100% 立绘会变灰蒙蒙一块，失掉自己的颜色
  *   ③ 空间渐变 —— 上亮下暗（"光从上来"是最保险的假设），比整体提亮自然得多
  */
-const LIGHT = { ok:false, lum:0.5, r:0.5, b:0.5, sat:0.3 };
+const LIGHT = { ok:false, lum:0.5, r:0.5, b:0.5, sat:0.3, fieldX:0, fieldY:0, groundR:.3, groundG:.3, groundB:.3, noise:0, neutralRB:1, neutralConfidence:0 };
 let LIGHT_ON = true, lightTick = 0, lcv = null, lctx = null;
 // 三个分量**各自一个开关**。合在一个开关里的话，出了"太暗/太黄"分不清是谁干的 ——
 // 测试时单独切每一项，才能判断哪种处理让人物不自然。默认全开。
@@ -1139,15 +1265,19 @@ let LIGHT_SAT = true;   // 环境色/饱和度
 // ★ 质感匹配（2026-09-18 加）：光色对上了还是"贴上去的"，差的是**照片的脏**。
 //   手机在暗处会飙 ISO，噪点就上来了；立绘是像素级干净的（AI 出图 / 矢量级描边），
 //   两张贴一起，一眼假。这一层只补**颗粒**，而且只补在立绘上 —— 照片是人家拍的，一个像素都不动。
-let LIGHT_GRN = true;   // 颗粒（噪点）
-// 边缘柔化：立绘的边是刀口级的，照片里没有这种边。默认**关** ——
-// 它可能把立绘自带的边缘底色（抠图残留）拖出来，先出 A/B 让人看，别擅自上。
-let LIGHT_SFT = false;
-// 颗粒幅度：暗环境大、亮环境几乎没有 —— 这正是手机相机的行为（ISO 跟环境亮度反着走）。
-// 上限 6.5 是 255 里的 6.5，约 2.5% —— 再大就不是"照片的脏"，是雪花屏了。
-const GRN_MAX = 6.5, GRN_MIN = 0.7;
-const GRN_COMP_MAX = 3.2;   // 缩放补偿上限（见 bakeLit 里的说明）
-const SFT_PX = 0.6;     // 柔化像素数（原生分辨率下）
+// ★ 颗粒默认**关**。「清晰」是第一版的出厂配置：默认结果保留原画细节，不自动加颗粒。
+//   想用的人自己开（融合面板那颗按钮），开了以后参数和以前一样。
+//   依据：ARCHITECTURE-CHANGE-PROPOSAL §6.2 的「清晰默认」表。
+let LIGHT_GRN = false;  // 颗粒（噪点）
+// ★ 旧「边缘柔化」已停用（2026-11-05）。原因不是"效果不好"，而是**实现会产生黑边**：
+//   它只模糊 alpha 通道、RGB 一个字节不动；而立绘 PNG 的透明像素 RGB 通常是 (0,0,0)。
+//   于是"原来 alpha=0 的地方"被抹出 alpha>0、颜色却是黑的 —— 叠加后就是一圈暗边。
+//   更根本的问题是：真正需要的是"边缘颜色有前景约束的修边"，不是对 alpha 做对称平滑。
+//   这条路径留着当参考没有价值（它是错的），需要重做，见 §6.3 / §23.2。
+let LIGHT_MIX = 1, SHADOW_GAIN = 1;
+// Noise amplitude is measured from native-resolution scene patches.
+const GRN_MAX = 4;
+const GRN_COMP_MAX = 2;
 // 响应速度：环境变了之后人物多久跟上（新值占比，越大越快、也越容易闪）
 const LIGHT_K = 0.12;
 // 匹配幅度：相对"中性环境"允许人物被调亮/调暗到多少倍。两头都夹住 ——
@@ -1168,6 +1298,7 @@ const clampN = (x, a, b) => Math.min(b, Math.max(a, x));
  *      看着像电视雪花，比不加还假。固定种子的一张砖查表取，两次位运算。
  */
 let grnTile = null;
+let lightPhotoSource=null, lightPhotoKey='', lightPhotoMeasurement=null;
 function grainTile(){
   if (grnTile) return grnTile;
   grnTile = new Float32Array(256 * 256);
@@ -1181,7 +1312,9 @@ function grainTile(){
 
 /** 每 6 帧采一次：把当前帧缩到 32×32，算三通道均值 */
 function sampleLight(){
-  if (!LIGHT_ON || !v.videoWidth || (lightTick++ % 6)) return;
+  const source=scenePhoto ? $('scenePhotoCanvas') : v;
+  const sourceW=scenePhoto ? source.width : v.videoWidth, sourceH=scenePhoto ? source.height : v.videoHeight;
+  if (!LIGHT_ON || !sourceW || (!scenePhoto && (lightTick++ % 6))) return;
   const N = 32;
   if (!lcv){
     lcv = document.createElement('canvas'); lcv.width = lcv.height = N;
@@ -1191,16 +1324,23 @@ function sampleLight(){
   //   整帧会把白墙、天空这些"根本没照在人物身上"的东西混进均值里。
   //   视频里没有立绘本身（它是后叠上去的），所以这一块采到的就是**人物背后的实景** ——
   //   不需要任何分割模型就能避开人物自己。
-  const VWv = v.videoWidth, VHv = v.videoHeight;
+  const VWv = sourceW, VHv = sourceH;
   const rr = clampRegion(lightRegion(), VWv, VHv);   // 取框口径跟出图共用一份
-  const m = measureRegion(v, VWv, VHv, rr.sx, rr.sy, rr.sw, rr.sh, N);
+  const key=[VWv,VHv,rr.sx,rr.sy,rr.sw,rr.sh].map(Math.round).join('|');
+  let m;
+  if(scenePhoto && lightPhotoSource===scenePhoto && lightPhotoKey===key)m=lightPhotoMeasurement;
+  else {
+    m=measureRegion(source,VWv,VHv,rr.sx,rr.sy,rr.sw,rr.sh,N);
+    if(scenePhoto){lightPhotoSource=scenePhoto;lightPhotoKey=key;lightPhotoMeasurement=m;}
+  }
   if (!m) return;
   const lum = m.lum, R = m.r * 255, B = m.b * 255;
-  const k = LIGHT_K;                    // ① 响应速度，新值占比
+  const k = scenePhoto ? 1 : LIGHT_K;
   LIGHT.lum += (lum   - LIGHT.lum) * k;
   LIGHT.r   += (m.r   - LIGHT.r)  * k;
   LIGHT.b   += (m.b   - LIGHT.b)  * k;
   LIGHT.sat += (m.sat - LIGHT.sat) * k;
+  for (const key of ['fieldX','fieldY','groundR','groundG','groundB','noise','neutralRB','neutralConfidence']) LIGHT[key] += (m[key] - LIGHT[key]) * k;
   LIGHT.ok = true;
 }
 
@@ -1215,12 +1355,60 @@ function measureRegion(源, 源宽, 源高, sx, sy, sw, sh, N){
   const g = c.getContext('2d', { willReadFrequently: true });
   try { g.drawImage(源, sx, sy, sw, sh, 0, 0, N, N); } catch (e) { return null; }
   const d = g.getImageData(0, 0, N, N).data;
-  let R = 0, G = 0, B = 0;
-  for (let i = 0; i < d.length; i += 4){ R += d[i]; G += d[i+1]; B += d[i+2]; }
+  let R = 0, G = 0, B = 0, neutralLogRB=0, neutralN=0;
+  for (let i = 0; i < d.length; i += 4){
+    R += d[i]; G += d[i+1]; B += d[i+2];
+    const hi=Math.max(d[i],d[i+1],d[i+2]),lo=Math.min(d[i],d[i+1],d[i+2]);
+    // Prefer moderately bright, near-neutral surfaces to colored walls/clothes.
+    if(lo>48 && hi<245 && (hi-lo)/hi<.25){neutralLogRB+=Math.log(d[i]/Math.max(1,d[i+2]));neutralN++;}
+  }
   const n = d.length / 4; R /= n; G /= n; B /= n;
   const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
+  let left=0,right=0,top=0,bottom=0,gr=0,gg=0,gb=0,gn=0;
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++) {
+    const i=(y*N+x)*4,l=(.2126*d[i]+.7152*d[i+1]+.0722*d[i+2])/255;
+    if(x<N/2)left+=l;else right+=l;
+    if(y<N/2)top+=l;else bottom+=l;
+    if(y>=N*.8){gr+=d[i];gg+=d[i+1];gb+=d[i+2];gn++;}
+  }
   return { lum: (0.2126*R + 0.7152*G + 0.0722*B) / 255, r: R/255, b: B/255,
-           sat: mx ? (mx - mn) / mx : 0 };
+           sat: mx ? (mx - mn) / mx : 0,
+           fieldX:clampN((right-left)/(right+left+.01)*.2,-.12,.12),
+           fieldY:clampN((bottom-top)/(bottom+top+.01)*.2,-.12,.12),
+           groundR:gr/Math.max(1,gn)/255,groundG:gg/Math.max(1,gn)/255,groundB:gb/Math.max(1,gn)/255,
+           neutralRB:neutralN ? Math.exp(neutralLogRB/neutralN) : 1,
+           neutralConfidence:Math.min(1,neutralN/(n*.12)),
+           noise:measureSceneNoise(源,源宽,源高,{sx,sy,sw,sh}) };
+}
+
+// Measure at source pixel scale. Downsampling first hides real sensor noise.
+// A 2x2 diagonal residual rejects smooth gradients; the lower patch quartile
+// limits contamination by fabric/foliage detail. This remains a conservative estimate.
+function measureSceneNoise(source,W,H,region){
+  const size=Math.min(40,W,H);if(size<8)return 0;
+  const c=document.createElement('canvas');c.width=c.height=size*3;
+  const g=c.getContext('2d',{willReadFrequently:true}),estimates=[];
+  for(let py=0;py<3;py++)for(let px=0;px<3;px++){
+    const x=clampN(region.sx+region.sw*(px+.5)/3-size/2,0,W-size);
+    const y=clampN(region.sy+region.sh*(py+.5)/3-size/2,0,H-size);
+    try{g.drawImage(source,Math.round(x),Math.round(y),size,size,px*size,py*size,size,size);}catch(e){return 0;}
+  }
+  const pixels=g.getImageData(0,0,c.width,c.height).data;
+  for(let py=0;py<3;py++)for(let px=0;px<3;px++){
+    const d=pixels,values=[],stride=c.width;
+    const base=(py*size*stride+px*size)*4;
+    const lum=i=>.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];
+    for(let yy=0;yy<size-1;yy++)for(let xx=0;xx<size-1;xx++){
+      const i=base+(yy*stride+xx)*4,a=lum(i),b=lum(i+4),cc=lum(i+stride*4),dd=lum(i+(stride+1)*4);
+      if(Math.min(a,b,cc,dd)<12||Math.max(a,b,cc,dd)>243)continue;
+      if(Math.max(Math.abs(a-b),Math.abs(a-cc),Math.abs(b-dd),Math.abs(cc-dd))>18)continue;
+      values.push(Math.abs(a-b-cc+dd)*.5);
+    }
+    if(values.length>=size*size*.3){values.sort((a,b)=>a-b);estimates.push(values[values.length>>1]/.6745);}
+  }
+  if(!estimates.length)return 0;
+  estimates.sort((a,b)=>a-b);
+  return clampN(estimates[Math.floor((estimates.length-1)*.25)],0,GRN_MAX);
 }
 
 /**
@@ -1230,12 +1418,12 @@ function measureRegion(源, 源宽, 源高, sx, sy, sw, sh, N){
  * 用完还原，并把缓存标记清掉，免得预览被这次出图带偏。
  */
 function withLight(m, fn){
-  const keep = { lum: LIGHT.lum, r: LIGHT.r, b: LIGHT.b, sat: LIGHT.sat, ok: LIGHT.ok };
-  LIGHT.lum = m.lum; LIGHT.r = m.r; LIGHT.b = m.b; LIGHT.sat = m.sat; LIGHT.ok = true;
+  const keep = { ...LIGHT };
+  Object.assign(LIGHT,m,{ok:true});
   litSig = '';                       // 强制按新值重烘
   try { fn(); }
   finally {
-    LIGHT.lum = keep.lum; LIGHT.r = keep.r; LIGHT.b = keep.b; LIGHT.sat = keep.sat; LIGHT.ok = keep.ok;
+    Object.assign(LIGHT,keep);
     litSig = '';                     // 下次预览会按还原后的值重烘一次（只多一次，可忽略）
   }
 }
@@ -1260,12 +1448,13 @@ function lightRegion(){
 }
 
 /** 立绘自己的平均亮度。⚠ 透明像素必须跳过 —— 不算的话一张大半透明的立绘会被当成很暗 */
-function charLum(){
-  if (!chCanvas || !chCanvas.width) return 0;
-  const w = 32, h = Math.max(1, Math.round(chCanvas.height / chCanvas.width * 32));
+function charLum(srcC){
+  srcC = srcC || chCanvas;
+  if (!srcC || !srcC.width) return 0;
+  const w = 32, h = Math.max(1, Math.round(srcC.height / srcC.width * 32));
   const c = document.createElement('canvas'); c.width = w; c.height = h;
   const g2 = c.getContext('2d', { willReadFrequently: true });
-  g2.drawImage(chCanvas, 0, 0, w, h);
+  g2.drawImage(srcC, 0, 0, w, h);
   const d = g2.getImageData(0, 0, w, h).data;
   let L = 0, Sa = 0, Ra = 0, Ba = 0, n = 0;
   for (let i = 0; i < d.length; i += 4){
@@ -1286,23 +1475,32 @@ function charLum(){
 // （lightFilter / lightTint 已删：V4 改成逐像素烘制之后没人调它们了。
 //   filter 那套做不了 R/B 通道增益，是色温追不上的根因。）
 
-function bakeLit(){
-  if (!chCanvas || !chCanvas.width) return;
-  if (litFor !== chCanvas){ litFor = chCanvas; chLum = 0; litSig = ''; litCv = null; }
-  if (!chLum) chLum = charLum();
+/**
+ * 把环境光烘到立绘上。
+ * @param srcC 要烘的源画布，默认 chCanvas。导出时会传一张**更高分辨率的同一张图**
+ *             （见 buildCharHi）—— 同一套光、同一套参数，只是采样更密。
+ * ⚠ litCv 只有一份：换源就重烘。所以导出结束后必须再烘一次工作副本，
+ *   否则下一帧预览会拿高清图当预览用（draw() 里会自然触发，别省这一步）。
+ */
+function bakeLit(srcC){
+  srcC = srcC || chCanvas;
+  if (!srcC || !srcC.width) return;
+  if (litFor !== srcC){ litFor = srcC; chLum = 0; litSig = ''; litCv = null; }
+  if (!chLum) chLum = charLum(srcC);
   // ⚠ sig 必须把三个分开关也算进去，否则切开关时缓存不失效、烘的还是上一版
   const sig = (LIGHT_ON && LIGHT.ok)
-    ? LIGHT.lum.toFixed(1) + '|' + (LIGHT.r - LIGHT.b).toFixed(1) + '|' +
+    ? LIGHT.lum.toFixed(2) + '|' + (LIGHT.r - LIGHT.b).toFixed(2) + '|' + (LIGHT.fieldX||0).toFixed(2) + '|' + (LIGHT.fieldY||0).toFixed(2) + '|' +
       (LIGHT_BRI?1:0) + (LIGHT_TMP?1:0) + (LIGHT_SAT?1:0) +
-      (LIGHT_GRN?1:0) + (LIGHT_SFT?1:0) + '|' + litScaleBucket() : 'off';
-  if (sig === litSig && litCv && litCv.width === chCanvas.width) return;
+      (LIGHT_GRN?1:0) + '|' + LIGHT_MIX.toFixed(2) + '|' + litScaleBucket() + '|' +
+      (LIGHT.noise||0).toFixed(1) + '|' + (LIGHT.neutralRB||1).toFixed(2) + '|' + (LIGHT.neutralConfidence||0).toFixed(1) + '|' + LIGHT.sat.toFixed(2) : 'off';
+  if (sig === litSig && litCv && litCv.width === srcC.width) return;
   litSig = sig;
 
-  const w = chCanvas.width, h = chCanvas.height;
+  const w = srcC.width, h = srcC.height;
   if (!litCv){ litCv = document.createElement('canvas'); litCtx = litCv.getContext('2d'); }
   if (litCv.width !== w || litCv.height !== h){ litCv.width = w; litCv.height = h; }
   litCtx.clearRect(0, 0, w, h);
-  if (!LIGHT_ON || !LIGHT.ok) { litCtx.drawImage(chCanvas, 0, 0); return; }
+  if (!LIGHT_ON || !LIGHT.ok) { litCtx.drawImage(srcC, 0, 0); return; }
 
   // ★ 逐像素烘一版，不用 ctx.filter。
   //   原因：filter 只能调"整体亮度/反差/饱和"，**做不了 R/B 通道增益**，
@@ -1311,8 +1509,8 @@ function bakeLit(){
   //   逐像素能一次性把 亮度 + 白平衡 + 饱和度 都算准。开销可接受：
   //   只在换立绘或光线明显变化时跑一次（litSig 挡住重复），不是每帧。
   let src;
-  try { src = chCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h); }
-  catch (e) { litCtx.drawImage(chCanvas, 0, 0); return; }   // 读不到就退回原图，别让整页炸
+  try { src = srcC.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h); }
+  catch (e) { litCtx.drawImage(srcC, 0, 0); return; }   // 读不到就退回原图，别让整页炸
   const d = src.data, out = litCtx.createImageData(w, h), o = out.data;
 
   // 明暗：环境相对中性(0.42)的受限增益。**不追"人物平均=环境平均"** ——
@@ -1322,18 +1520,15 @@ function bakeLit(){
   //   分档实测暗餐厅那格，暗部亮度 0.144 → 0.045、局部反差 0.052 → 0.024（-54%），
   //   深色头发和衣服糊成一块。而**整体**反差反而是涨的（亮部涨了，把暗部平均掉），
   //   所以只看整体永远发现不了 —— 是分档量出来的。声明在这儿是因为下面白平衡的基准也要用它。
-  const inv = Math.pow(1 / gL, 0.6);
+  const inv = Math.pow(1 / gL, 0.35);
+  // A pure gamma curve leaves white at 255 even in a dark room. Attenuate the
+  // illumination as well so pale faces and white clothes do not glow at night.
+  const illumination = gL < 1 ? Math.pow(gL,.45) : 1;
   // 白平衡：把立绘的 R/B 往环境的 R/B 挪 K 那一份（对数空间，两端对称，整体亮度不变）
-  const envRB  = Math.max(0.05, LIGHT.r) / Math.max(0.05, LIGHT.b);
-  const charRB = Math.max(0.05, chR)     / Math.max(0.05, chB);
-  const K = 0.75;
-  // ⚠ 增益的**基准**必须是"过完曲线之后"的立绘色比，不是原始的。
-  //   gamma 是非线性的，它自己就会把 R/B 比抬一截（实测 1.21 → 1.44）。
-  //   拿原始 1.21 当基准去算增益，等于在抬高的底上再加一层 → 冲过环境值
-  //   （indoor_0 环境 1.72 被染成 1.86、night_4 环境 1.15 染成 1.38）。
-  //   均值经 gamma 映射约等于 v^inv，所以基准取 pow(charRB, inv)。
-  const charRBg = Math.pow(charRB, inv);
-  let ratio = LIGHT_TMP ? Math.pow(envRB / charRBg, K) : 1;
+  const envRB = LIGHT.neutralRB || 1;
+  const K = 0.5 * (LIGHT.neutralConfidence || 0);
+  // A character's average RGB describes its palette, not the incident light.
+  const ratio = LIGHT_TMP ? Math.pow(envRB, K) : 1;
   // ⚠ 增益必须**限幅**。分档实测：暗餐厅那格白花那一档的 R/B 比从 1.03 冲到 1.69 ——
   //   白花被染成黄色。原因是那里的环境比立绘暖得多，算出来的 gR 到了 1.34。
   //   高光本来就是光源色的直接反映，会被染，但不该染成这样。夹住，并保持 gR·gB=1（不影响整体明暗）。
@@ -1364,29 +1559,22 @@ function bakeLit(){
   const wOf = (v) => v <= 165 ? 0 : v >= 215 ? 1 : (v - 165) / 50;
   const lutR = new Uint8Array(256), lutG = new Uint8Array(256), lutB = new Uint8Array(256);
   for (let v = 0; v < 256; v++){
-    const cur = Math.pow(v / 255, inv) * 255;
+    const cur = Math.pow(v / 255, inv) * 255 * illumination;
     const w = wOf(v);
     lutR[v] = Math.round(clamp255(cur * (gRfull + (gRcap - gRfull) * w)));
     lutB[v] = Math.round(clamp255(cur * (1 / gRfull + (1 / gRcap - 1 / gRfull) * w)));
     lutG[v] = Math.round(clamp255(cur));
   }
 
-  // ★ 颗粒幅度：跟着**环境**亮度走，不跟立绘自己走。
-  //   同一张立绘在暗餐厅里该有噪点、在亮海滩上不该有 —— 噪点是"拍摄条件"的属性，
-  //   不是"被拍物体"的属性。这也是它跟另外三个分量最大的不同。
-  //
-  // ★★ 再乘一个**缩放补偿** —— 这条是踩出来的，不补的话整套白做：
-  //   颗粒是在**原生分辨率**上烘的（立绘 1509px 高），但它在画面里只画成 300px 高，
-  //   5 倍下采样会把 ±5 的噪声平均成 ±1，等于没加。而且立绘越小越没有，
-  //   恰好是最需要融入的场景（远景全身）最没效果。
-  //   所以缩得越小、烘进去的颗粒越大，落到屏幕上才是同一个量级。
-  //   上限 3.2 倍：再往上补，暗部那头的噪声会被 0 削平（黑位反而变干净，不自然）。
+  // Use measured scene noise; dark, denoised photos must remain clean.
+  // Bound the final amplitude even when compensating for a smaller character.
   const gAmp = LIGHT_GRN
-    ? clampN(GRN_MAX * (1 - LIGHT.lum * 1.35), GRN_MIN, GRN_MAX) *
-      clampN(1 / litScaleBucket(), 1, GRN_COMP_MAX)
-    : 0;
+    ? Math.min(GRN_MAX, Math.max(0, (LIGHT.noise||0)-.35) * Math.sqrt(3) *
+      clampN(1 / litScaleBucket(), 1, GRN_COMP_MAX)) : 0;
   const tile = gAmp > 0 ? grainTile() : null;
   const TM = 255;
+  const edgeEnvR = clampN(Math.sqrt(ratio), 0.85, 1.18);
+  const edgeEnvB = 1 / edgeEnvR;
   let gx = 0, gy = 0;
 
   for (let i = 0; i < d.length; i += 4){
@@ -1398,6 +1586,19 @@ function bakeLit(){
       const y = 0.2126*r + 0.7152*gg + 0.0722*b;
       r = y + (r - y) * sK; gg = y + (gg - y) * sK; b = y + (b - y) * sK;
     }
+    // 柔和的纵向受光梯度：给平面插画一点与镜头环境一致的明暗层次，幅度限制在约 ±2%。
+    // 只烘在有光线数据时，保留原画的阴影结构，不用强滤镜把脸和衣服压成同一层。
+    const yn = h > 1 ? y0 / (h - 1) : 0.5;
+    const shade = 1 + (LIGHT.fieldY||0) * (yn-.5) + (LIGHT.fieldX||0) * (x0/Math.max(1,w-1)-.5);
+    r *= shade; gg *= shade; b *= shade;
+    // 半透明边缘轻微沾环境色，减少抠图后“纸片边缘”的冷暖断层；只处理轮廓像素。
+    const alpha = d[i+3];
+    if (alpha > 0 && alpha < 224) {
+      const edgeMix = (1 - alpha / 224) * 0.025;
+      r = r * (1 - edgeMix) + r * edgeEnvR * edgeMix;
+      gg = gg * (1 - edgeMix) + gg * edgeMix;
+      b = b * (1 - edgeMix) + b * edgeEnvB * edgeMix;
+    }
     if (tile){
       // 只加在**颜色**上，一个字节都不碰 alpha —— 加 alpha 会让边缘长出毛刺、
       // 还会把半透明的边变成会呼吸的（每次重烘孔径都在抖）。
@@ -1406,48 +1607,14 @@ function bakeLit(){
       const nL = n * gAmp, nC = n * gAmp * 0.35;
       r += nL; gg += nL - nC; b += nL + nC;
     }
-    o[i] = clamp255(r); o[i+1] = clamp255(gg); o[i+2] = clamp255(b); o[i+3] = d[i+3];
-  }
-  // ★ 边缘柔化（默认关）：立绘的边是刀口级的，照片里没有这种边 ——
-  //   那一圈锐利的轮廓就是"贴上去"最硬的证据。这里**只柔化 alpha，RGB 一个字节都不动**。
-  //   只动 alpha 有两个好处：
-  //     ① 不会把立绘内部的细节糊掉 —— 内部 alpha 恒为 255，模糊完还是 255；
-  //     ② 不会出黑边 —— 半透明像素带的是立绘**自己的颜色**，叠上去是正经的 alpha 混合，
-  //        不是"先跟黑混合再叠上去"。
-  //   为什么不用 ctx.filter='blur(x)'：那玩意儿在 --disable-gpu 的 headless 里**静默失效**
-  //   （filter 属性读得回来 "blur(3px)"，像素一个都不动 —— 实测高频 4.05 → 4.05），
-  //   我在这台机器上根本验证不了；老一点的 Safari 同样静默忽略。
-  //   自己算三抽头：哪儿都能跑、哪儿都能测。分离式两趟（先横后竖），
-  //   开销只有那个逐像素循环的零头，而且只在换立绘/换光时才跑。
-  if (LIGHT_SFT && SFT_PX > 0){
-    const k = clampN(SFT_PX, 0, 1);
-    const edge = k / 2, mid = 1 - k;          // k=0 恒等，k=1 最狠
-    const np = w * h;
-    if (!sftA || sftA.length !== np){ sftA = new Uint8ClampedArray(np); sftB = new Uint8ClampedArray(np); }
-    for (let p = 0, i = 3; p < np; p++, i += 4) sftA[p] = d[i];
-    for (let y = 0; y < h; y++){
-      const row = y * w;
-      for (let x = 0; x < w; x++){
-        // 边界夹住取自己，不要把画布外当成透明 —— 立绘是紧贴裁边的，
-        // 按透明处理会给四条边额外开一圈口子。
-        const l = sftA[row + (x > 0 ? x - 1 : 0)];
-        const r2 = sftA[row + (x < w - 1 ? x + 1 : w - 1)];
-        sftB[row + x] = mid * sftA[row + x] + edge * (l + r2);
-      }
-    }
-    for (let y = 0; y < h; y++){
-      const up = (y > 0 ? y - 1 : 0) * w, dn = (y < h - 1 ? y + 1 : h - 1) * w, row = y * w;
-      for (let x = 0; x < w; x++)
-        sftA[row + x] = mid * sftB[row + x] + edge * (sftB[up + x] + sftB[dn + x]);
-    }
-    for (let p = 0, i = 3; p < np; p++, i += 4) o[i] = sftA[p];
+    o[i] = clamp255(d[i]+(r-d[i])*LIGHT_MIX);
+    o[i+1] = clamp255(d[i+1]+(gg-d[i+1])*LIGHT_MIX);
+    o[i+2] = clamp255(d[i+2]+(b-d[i+2])*LIGHT_MIX); o[i+3] = d[i+3];
   }
   litCtx.putImageData(out, 0, 0);
   return;
 }
 let litFor = null;
-// 柔化用的两张 alpha 缓冲，只按尺寸重建一次 —— 烘焙本来就够重，别再给 GC 添活
-let sftA = null, sftB = null;
 // 立绘这一帧被画成多大（屏幕上的宽 ÷ 它自己的像素宽），由 drawCharTo 每次填。
 // 颗粒要靠它做缩放补偿。**必须分档**：拖大小滑块时如果每变一点就重烘一次，
 // 一次烘焙是百万像素级的循环，拖着会卡；分档之后只在跨档时重烘。
@@ -1458,10 +1625,12 @@ function litScaleBucket(){
 }
 
 /** 预览和出图都用这一张 —— 两边同源，照片和立绘层才对得上 */
-function litChar(){
-  if (!LIGHT_ON || !LIGHT.ok) return chCanvas;
-  bakeLit();
-  return (litCv && litCv.width) ? litCv : chCanvas;
+function litChar(srcC){
+  srcC = srcC || chCanvas;
+  if (!srcC) return chCanvas;
+  if (!LIGHT_ON || !LIGHT.ok) return srcC;
+  bakeLit(srcC);
+  return (litCv && litCv.width === srcC.width) ? litCv : srcC;
 }
 
 $('tLight').addEventListener('click', e => {
@@ -1509,15 +1678,21 @@ $('tShd').addEventListener('click', e => {
 // 它**不改 2D 那条路的任何东西**：3D 渲染出一张"全屏透明图层"，在帧坐标 (0,0) 贴上去，
 // 于是 composeShot / scene.json / PSD / zip 一行都不用动，"预览 = 出图"这条不变量照旧成立。
 let use3D = false, pose3D = 0;
+let motion3dRaf = 0;
 const M3D = window.ARCAM_MMD || null;
 const d3dNoteEl = $('d3dNote'), pose3dRow = $('pose3dRow'), pose3dLabel = $('pose3dLabel');
 const model3dRow = $('model3dRow'), model3dLabel = $('model3dLabel');
 /** 3D 就位那句话（换模型/换包都走这里，别在两处各写一遍） */
 function d3dNoteOk(){
   const st = M3D.stats;
-  d3dNote(t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses) +
+  let s = t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses) +
           (st.texMiss ? ' ' + t('note.3dTexMiss', st.texOk || 0, (st.texOk || 0) + st.texMiss)
-                      : (st.kind === 'pmx' && st.texOk ? ' ' + t('note.3dTexPool', st.texOk) : '')));
+                      : (st.kind === 'pmx' && st.texOk ? ' ' + t('note.3dTexPool', st.texOk) : ''));
+  // ★ 缺贴图要说清"缺哪几张"，同名要说清"用的是哪一个"。
+  //   原来这两件事只打 console —— 用户报"白模"，开发者手上一个可复现的线索都没有。
+  if (st.texMissing && st.texMissing.length) s += ' ' + t('note.3dTexList', st.texMissing.join('、'));
+  if (st.dupNames) s += ' ' + t('note.3dTexDup', st.dupNames);
+  d3dNote(s);
 }
 /** 这个包里有哪些模型 —— 只有一个就不显示这一排 */
 function renderModel3DRow(){
@@ -1574,9 +1749,24 @@ function renderPose3DRow(){
     const b = document.createElement('button');
     b.type = 'button'; b.textContent = n;
     b.classList.toggle('on', i === pose3D);
-    b.onclick = () => { pose3D = i; renderPose3DRow(); draw(); };
+    b.onclick = () => {
+      pose3D = i;
+      if (M3D && M3D.motionName) {
+        M3D.clearMotion(); stopMotion3dLoop();
+        if ($('t3dMotion')) $('t3dMotion').textContent = t('motion.play');
+        if ($('motion3dNote')) $('motion3dNote').textContent = t('motion.staticNote');
+      }
+      renderPose3DRow(); draw();
+    };
     pose3dRow.appendChild(b);
   });
+  if ($('motion3dRow')) $('motion3dRow').style.display = M3D.canAnimate ? '' : 'none';
+  if ($('motion3dNote')) $('motion3dNote').style.display = M3D.canAnimate ? '' : 'none';
+  if ($('material3dRow')) $('material3dRow').style.display = M3D.canAnimate ? '' : 'none';
+  if ($('t3dMotion')) {
+    $('t3dMotion').disabled = !M3D.motionName;
+    $('t3dMotion').textContent = t(M3D.motionPlaying ? 'motion.pause' : (M3D.motionName ? 'motion.resume' : 'motion.play'));
+  }
   // 模型进来了才谈得上调主光方向 —— 跟着显示，并回填当前值
   if ($('az3dRow')) $('az3dRow').style.display = '';
   if ($('el3dRow')) $('el3dRow').style.display = '';
@@ -1590,6 +1780,60 @@ function renderPose3DRow(){
     if ($('focus3d')) { $('focus3d').value = S.d; $('ofocus3d').textContent = S.d.toFixed(1) + 'm'; }
   }
 }
+function stopMotion3dLoop(){
+  if (motion3dRaf) cancelAnimationFrame(motion3dRaf);
+  motion3dRaf = 0;
+}
+function startMotion3dLoop(){
+  stopMotion3dLoop();
+  let previous=0;
+  const tick = now => {
+    if (!M3D || !M3D.motionPlaying || !use3D || document.hidden) { motion3dRaf = 0; return; }
+    if(now-previous>=1000/30){
+      previous=now;
+      // ★ 时间**在这里推进**，而且只在这里。draw() 只负责画当前状态 ——
+      //   这样拖滑条、改光照、导出都不会顺手把动作往前推（见 mmd.js advanceMotion 的注释）。
+      M3D.advanceMotion(now);
+      draw();
+    }
+    motion3dRaf = requestAnimationFrame(tick);
+  };
+  motion3dRaf = requestAnimationFrame(tick);
+}
+if ($('idle3d')) $('idle3d').onclick = () => {
+  if (!M3D || !M3D.playIdle()) return;
+  use3D=true;$('t3d').classList.add('on');S.charKind='full';S.shot='全身';S.mode='ground';syncModeRow();
+  $('t3dMotion').disabled=false;$('t3dMotion').textContent=t('motion.pause');
+  d3dNote(t('motion.idleNote'));startMotion3dLoop();
+};
+if ($('material3d')) $('material3d').onchange = async e => {
+  const select=e.target;select.disabled=true;stopMotion3dLoop();d3dNote(t('material.loading'));
+  try {
+    const ok=await M3D.setMaterialStyle(select.value);
+    if(!ok) { select.value=M3D.params.material; d3dNote(M3D.error || t('material.fail'));return; }
+    renderPose3DRow();renderModel3DRow();d3dNoteOk();draw();
+  } finally { select.disabled=false; }
+};
+if ($('f3dMotion')) $('f3dMotion').onclick = () => $('f3dMotionFile').click();
+if ($('f3dMotionFile')) $('f3dMotionFile').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f || !M3D || !M3D.srcName) { d3dNote(t('motion.needModel')); return; }
+  d3dNote(t('motion.matching'));
+  const result = await M3D.loadMotion(f);
+  if (!result) { stopMotion3dLoop(); d3dNote(M3D.error || t('motion.fail')); return; }
+  use3D=true;$('t3d').classList.add('on');S.charKind='full';S.shot='全身';S.mode='ground';syncModeRow();
+  $('motion3dRow').style.display = '';
+  $('motion3dNote').style.display = '';
+  $('t3dMotion').disabled = false; $('t3dMotion').textContent = t('motion.pause');
+  d3dNote(t('motion.loaded',result.name,result.tracks));
+  startMotion3dLoop();
+});
+if ($('t3dMotion')) $('t3dMotion').onclick = () => {
+  if (!M3D || !M3D.motionName) return;
+  const playing = M3D.pauseMotion(M3D.motionPlaying);
+  $('t3dMotion').textContent = t(playing ? 'motion.pause' : 'motion.resume');
+  if (playing) startMotion3dLoop(); else { stopMotion3dLoop(); draw(); }
+};
 // 主光方向：只改 mmd.js 里的参数，立刻重画一帧就能看到影子转向
 if ($('az3d')) $('az3d').addEventListener('input', e => {
   if (M3D && M3D.params) M3D.params.keyAz = +e.target.value;
@@ -1616,7 +1860,8 @@ function ensurePlaceholderChar(){
   if (chCanvas) return;
   const c = document.createElement('canvas');
   c.width = 300; c.height = 520;          // ≈0.58 宽高比，接近全身立绘
-  chCanvas = c; chBase = c; chOrig = c; chName = '3D';
+  // 3D 占位：四份都指向同一张空白画布，状态保持一致（chCut 也要有，否则下一次 recomposeChar 会把画布清空）
+  chCanvas = c; chBase = c; chOrig = c; chCut = c; chCropNorm = null; chName = '3D';
 }
 async function d3dInitEngine(){
   if (!M3D) { d3dNote(t('note.3dNoEngine')); return false; }
@@ -1634,7 +1879,8 @@ async function d3dLoadFile(file){
   const ok = await M3D.load(file, p => d3dNote(t('note.3dLoading') + ' ' + Math.round(p * 100) + '%'));
   if (!ok) { d3dNote(t('note.3dFail', M3D.error || '?')); return; }
   use3D = true; $('t3d').classList.add('on');
-  if (S.mode === 'free') { S.mode = 'ground'; syncModeRow(); }   // 3D 必须站地上，自由模式那套没意义
+  S.charKind='full';S.shot='全身';renderShotRow();
+  syncModeRow();   // 3D 必须站地上；自由摆位那颗按钮在 3D 下直接不显示（见 syncModeRow）
   ensurePlaceholderChar();
   renderPose3DRow();
   renderModel3DRow();
@@ -1647,11 +1893,12 @@ $('t3d').onclick = async () => {
   use3D = !use3D;
   $('t3d').classList.toggle('on', use3D);
   if (use3D){
-    if (S.mode === 'free') { S.mode = 'ground'; syncModeRow(); }
+    S.charKind='full';S.shot='全身';renderShotRow();
     ensurePlaceholderChar();
     const ok = await d3dInitEngine();
     if (ok && !M3D.srcName) d3dNote(t('note.3dNeedModel'));
   } else d3dNote('');
+  syncModeRow();      // 进出 3D 都要重算一次"哪些摆位控件真的有效"
   draw();
 };
 $('f3d').onclick = () => $('f3dFile').click();
@@ -1677,10 +1924,10 @@ $('f3dDir').addEventListener('change', e => {
  */
 let envFrameCv = null;
 function lightFrame(){
-  const v = document.getElementById('v');
-  if (!v || !v.videoWidth) return null;
+  const source=scenePhoto ? $('scenePhotoCanvas') : v;
+  if (!scenePhoto && !v.videoWidth) return null;
   if (!envFrameCv){ envFrameCv = document.createElement('canvas'); envFrameCv.width = 64; envFrameCv.height = 36; }
-  try { envFrameCv.getContext('2d').drawImage(v, 0, 0, 64, 36); } catch (e) { return null; }
+  try { envFrameCv.getContext('2d').drawImage(source, 0, 0, 64, 36); } catch (e) { return null; }
   return envFrameCv;
 }
 
@@ -1689,22 +1936,28 @@ function lightFrame(){
  * 所以两张图里 3D 的位置一模一样 —— 这正是"预览 = 出图"要的东西。
  * @returns true = 真的画了；false = 没就绪，调用方回退到 2D 那条路
  */
-function draw3DLayer(g){
+function draw3DLayer(g, backgroundCtx){
   if (!use3D || !M3D || !M3D.ready || !M3D.srcName) return false;
   const t0 = performance.now();
+  const previewScale=g===ctx ? Math.min(1,Math.sqrt(1400000/(cv.width*cv.height))) : 1;
   const ms = M3D.render({
-    W: cv.width, H: cv.height, f: focal(),
+    W: Math.round(cv.width*previewScale), H: Math.round(cv.height*previewScale), f: focal()*previewScale,
     camH: S.h, pitch: S.pitch, roll: S.roll,
     x: S.x, d: S.d, hp: S.Hp, scale: S.charScale,
     pose: pose3D, env: LIGHT, envFrame: lightFrame(),
   });
-  if (!ms) return false;
+  // ⚠ 用 null 判"没就绪"，不能用 falsy：一帧耗时可能四舍五入成 0ms。
+  if (ms === null || ms === undefined) return false;
   const lay = M3D.canvas();
-  // 出图那一遍（有实拍帧时）才做色调匹配 —— 预览每帧要跑 200 万像素的循环，手机上会卡。
-  // ⚠ 不破坏"预览==导出"：这条只改**颜色**，几何/裁切/落位一个字没动；
-  //    而且出图本来就故意再采一次光（见 composeShot 的注释），预览与出图在颜色上本就允许不同。
-  const matched = (TONE_ON && lay) ? toneMatchedLayer(lay, g) : null;
-  g.drawImage(matched || lay, 0, 0);
+  // ★ 已移除"仅出图才跑"的色调匹配 + 轮廓羽化（2026-11-05）。
+  //   它带来三个问题，且都只在**出图**那一遍发生，所以用户看到的是"预览好好的，拍下来变灰变软"：
+  //     ① 明暗包络重映射把模型的 P5/P95 往背景拉 —— 亮房间成片整体变浅；
+  //     ② 轮廓 alpha 羽化时把边缘 RGB 混向背景色，等于**预混了一次背景**，
+  //        再走正常 alpha 合成就是 a²F+(1-a²)B（推导见方案 §7.3）；
+  //     ③ 预览没有这一步 —— 破坏"所见即所得"这条最硬的产品约定。
+  //   要保留"环境融合"这个能力，得先做成**预览与出图共用同一份配置**的正式效果（§8.1 的效果管线），
+  //   而不是塞在导出路径里偷偷跑一遍。
+  g.imageSmoothingQuality='high';g.drawImage(lay, 0, 0, cv.width, cv.height);
   M3D.stats.frameMs = Math.round(performance.now() - t0);
   return true;
 }
@@ -1729,6 +1982,9 @@ function drawInner() {
   if (S.grid) drawGrid();
   drawHorizon();
   sampleLight();              // 光线匹配：采当前帧（内部自己按帧数节流）
+  const shadowVisible=!use3D && S.charKind!=='half' && S.shot==='全身';
+  $('tShd').style.display=shadowVisible ? '' : 'none';
+  if($('shadowGain'))$('shadowGain').parentElement.style.display=shadowVisible ? '' : 'none';
   // 3D 立绘那条路：模型**真的站在那块地上**（相机/光照/影子都在 mmd.js 里），
   // 这里只是把它渲出来的一张全屏透明图层贴到帧上 —— 所以出图路径一行都不用改。
   if (!draw3DLayer(ctx)) drawCharTo(ctx);   // 立绘站在场景里 —— 和骨架、网格同一套投影
@@ -2161,8 +2417,7 @@ function renderFrameRow(){
     b.dataset.v = name;
     b.classList.toggle('on', name === S.frame);
     b.onclick = () => {
-      S.frame = name;
-      [...frameRow.children].forEach(x => x.classList.toggle('on', x.dataset.v === name));
+      setFrame(name);               // 换画幅 = 唯一会改裁切的用户操作
       resnap();                     // 框换了，贴边那条得按新框重算
       draw();
     };
@@ -2284,6 +2539,7 @@ bindFold('foldEdit', 'editBox', 'caretEdit');
 const openEditFold = (function(){
   const b = $('foldEdit'), box = $('editBox'), car = $('caretEdit');
   return () => {
+    selectWorkspace('assets');
     if (!b || !box || !box.hidden) return;
     box.hidden = false;
     b.classList.add('on');
@@ -2326,9 +2582,72 @@ const CUT = window.ARCAM_CUT || null;   // cutout.js 没加载上也不至于整
 let chOrig = null;
 let chBase = null;
 let chCanvas = null;
+/**
+ * 原始素材的**引用**（只读）。注意这里存的是"怎么再拿一次原图"，不是又一份解码后的像素：
+ *   blob —— 本地导入的 File，留着随时能重新解码（原始字节，没有任何处理）
+ *   url  —— 素材库里的站内路径，需要时再取
+ * 为什么必须留：chOrig 是**降采样后**的（MAXCH/600万像素），一旦它被覆盖，原图细节就永久丢了。
+ * 本轮先做到"原图不丢、尺寸可查"；导出直接吃原图（高清出图）属于阶段 2 的 ExportPlan。
+ */
+let chSrc = { blob: null, url: '', name: '', w: 0, h: 0 };
 let chName = '';
+
+/**
+ * 立绘的**可重放**状态。两样东西，都在 chOrig 的坐标系里：
+ *   chCut      抠图结果（颜色 + alpha），chOrig 尺寸，**未裁**
+ *   chCropNorm 裁切矩形（0..1 归一化）；null = 不裁
+ * chBase / chCanvas 一律由这两样 + chOrig **派生**出来，不再作为"权威状态"被反复覆盖。
+ *
+ * 为什么要这么拆：原来 chBase 既是"抠图结果"又是"裁过边的画布"，两者叠在一起，
+ * 一旦想在导出时按更高分辨率重算，就没有任何东西能描述"当初到底做了什么"。
+ * 拆开之后，「原图 + 抠图 alpha + 裁切」足以在任意分辨率上重放同一套操作 ——
+ * 这才是"素材可恢复"的落地形式（方案 §5.2）。
+ */
+let chCut = null;
+let chCropNorm = null;
+let chCutSeq = 0;                 // 抠图/裁切每变一次就 +1，给缓存做失效键
+let chHi = null, chHiKey = '';    // 导出用的高清立绘副本（按需生成，导出后释放）
+
+/** 把像素矩形换成归一化矩形（跨分辨率通用） */
+function normCropOf(canvas, rect){
+  if (!rect || !canvas || !canvas.width || !canvas.height) return null;
+  return { x: rect.x / canvas.width, y: rect.y / canvas.height,
+           w: rect.w / canvas.width, h: rect.h / canvas.height };
+}
+/** 按归一化矩形裁切（同一份描述，换到任何分辨率的画布上都成立） */
+function cropByNorm(canvas, norm){
+  if (!canvas) return null;
+  if (!norm) return copyOf(canvas);
+  const W = canvas.width, H = canvas.height;
+  const x = Math.max(0, Math.min(W - 1, Math.round(norm.x * W)));
+  const y = Math.max(0, Math.min(H - 1, Math.round(norm.y * H)));
+  const w = Math.max(1, Math.min(W - x, Math.round(norm.w * W)));
+  const h = Math.max(1, Math.min(H - y, Math.round(norm.h * H)));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(canvas, -x, -y);
+  return c;
+}
+/** 由 chCut + chCropNorm 重算 chBase / chCanvas。抠图、裁边之后都必须过这一道。 */
+function recomposeChar(){
+  chCutSeq++;
+  if (!chCut){ chBase = null; chCanvas = null; return; }
+  chBase = cropByNorm(chCut, chCropNorm);
+  chCanvas = copyOf(chBase);
+  litFor = null; litSig = '';      // 换了源就必须重烘
+  chHi = null; chHiKey = '';       // 高清副本跟着失效
+}
+/** 抠图之后重新贴边裁一次：不裁的话"贴边"贴的是图的边界，不是人 */
+function retrimCut(){
+  chCropNorm = null;
+  if (!CUT || !chCut) return false;
+  try {
+    const b = CUT.contentBounds(chCut, 8);
+    if (b && b.w >= 4 && b.h >= 4){ chCropNorm = normCropOf(chCut, b); return true; }
+  } catch (e) {}
+  return false;
+}
 let chSel = -1;
-const MAXCH = 1400;    // 长边先缩到这个尺寸再处理，和 studio 保持一致
+const MAXCH = 3072, MAXCH_PIXELS = 6000000;
 
 /** 自由模式的图心存**归一化**坐标（0~1），换尺寸/转屏都不会跑掉 */
 const freeP = { u: 0.5, v: 0.6 };
@@ -2346,16 +2665,26 @@ function chNote(s){
 }
 
 /** 把一张图变成基准画布。之后抠图 / 裁边全部从基准出发，绝不叠在处理过的结果上 */
-function setCharset(img){
+/** 按上限解码成画布。抽出来是为了导出时能用**更高的上限**再解一次（见 buildCharHi）。 */
+function decodeCharCanvas(img, maxDim, maxPixels){
   const sw = img.naturalWidth || img.width, sh = img.naturalHeight || img.height;
-  const k = Math.min(1, MAXCH/Math.max(sw, sh));
+  const k = Math.min(1, maxDim/Math.max(sw, sh), Math.sqrt(maxPixels/(sw*sh)));
   const c = document.createElement('canvas');
   c.width  = Math.max(1, Math.round(sw*k));
   c.height = Math.max(1, Math.round(sh*k));
-  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-  chOrig = c;
-  chBase = copyOf(c);
-  chCanvas = copyOf(c);
+  const g=c.getContext('2d');g.imageSmoothingQuality='high';
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+
+function setCharset(img){
+  const sw = img.naturalWidth || img.width, sh = img.naturalHeight || img.height;
+  chSrc.w = sw; chSrc.h = sh;   // 原图像素尺寸（未缩放）—— 用来算"输出放大倍数"、判断有没有被降采样
+  chOrig = decodeCharCanvas(img, MAXCH, MAXCH_PIXELS);
+  // 初始的"抠图结果"就是原图本身：自带 alpha 的 PNG 原样尊重，JPG 则是全不透明。
+  chCut = copyOf(chOrig);
+  chCropNorm = null;
+  recomposeChar();
 }
 
 /**
@@ -2374,55 +2703,21 @@ function setCharset(img){
  *   手动按钮（纯色底抠图 / AI 抠图 / 自动裁边）照旧在，用户想自己来随时可以。
  * @returns {{cut:number|null, trimmed:boolean, half:boolean}}
  */
-/**
- * 镜头微糊：把一张图**降采样再升回来**，补上"照片本来就带一点软"这件事。
- * 立绘是矢量级干净的（描边是刀口），照片没有这种边 —— 两者贴一起，一眼假的就是这个。
- * ⚠ 别用 `ctx.filter = 'blur()'`：HANDBOOK §4.14 实测它在本机 headless 下静默失效
- *   （属性读得回来、像素一个都不动），老 Safari 同样忽略。
- * @param k 降采样比例（越小越糊）。0.62 大约是"手机主摄在 1–2 米处的软度"。
- */
-function lensBlur(canvas, k){
-  const w = canvas.width, h = canvas.height;
-  if (w < 8 || h < 8) return false;
-  const tw = Math.max(2, Math.round(w * k)), th = Math.max(2, Math.round(h * k));
-  const t = document.createElement('canvas'); t.width = tw; t.height = th;
-  const tg = t.getContext('2d'); tg.imageSmoothingQuality = 'high';
-  tg.drawImage(canvas, 0, 0, tw, th);
-  const g = canvas.getContext('2d');
-  g.imageSmoothingQuality = 'high';
-  g.clearRect(0, 0, w, h);
-  g.drawImage(t, 0, 0, w, h);
-  return true;
-}
-
 function autoPrepareChar(){
   const out = { cut: null, trimmed: false, half: false };
-  if (!CUT || !chBase) return out;
-  const before = copyOf(chBase);            // 回退用
-  // ① 纯色底抠底
+  if (!CUT || !chCut) return out;
+  const before = copyOf(chCut);             // 回退用
+  // ① 纯色底抠底（只改 alpha，RGB 一个字节不动 —— 见 cutout.js）
   try {
-    const c = copyOf(chBase);
+    const c = copyOf(chCut);
     const r = CUT.cutSolidBg(c, { tol: 32, feather: 1.2 });
-    if (r !== null && r >= 0.05 && r <= 0.85){ chBase = c; out.cut = r; }
+    if (r !== null && r >= 0.05 && r <= 0.85){ chCut = c; out.cut = r; }
   } catch (e) {}
-  // ② 自动裁边（和「自动裁边」按钮走同一条路：从基准重算，不叠加）
-  try {
-    const b = CUT.contentBounds(chBase, 8);
-    if (b){
-      const r = CUT.cropToCanvas(chBase, b);
-      if (r && r.canvas && r.canvas.width >= 4 && r.canvas.height >= 4){ chBase = r.canvas; out.trimmed = true; }
-    }
-  } catch (e) {}
-  // ③ 软边整理：erode 1px 把轮廓往里收（收掉那圈**残留底色**）+ feather 2px 把边做软。
-  //    不做的两个症状：边是刀口级的（照片里没有这种边）+ 亮底抠出来一圈发白描边。
-  try {
-    if (CUT.softenEdge){ const s = CUT.softenEdge(chBase, { erode: 1, feather: 2 }); if (s && s.changed) out.soft = s; }
-  } catch (e) {}
-  // ④ 镜头微糊：手机照片不是像素级锐利的，而立绘是矢量级干净的 —— 差的就是这点"软"。
-  //    降采样往返（浏览器在**预乘 alpha** 空间插值，所以不会把透明像素的黑拉进边缘）。
-  //    ⚠ 不用 ctx.filter='blur()'：HANDBOOK §4.14 记过它在 headless 下静默失效。
-  try { out.blur = lensBlur(chBase, 0.62); } catch (e) {}
-  chCanvas = copyOf(chBase);
+  // ② 自动裁边（和「自动裁边」按钮走同一条路：从抠图结果重算，不叠加）
+  //    裁切只记一个**归一化矩形**，不再物理裁掉坐标 —— 换分辨率时同一个矩形照样成立。
+  out.trimmed = retrimCut();
+  // Retain source alpha: cutSolidBg already feathers once. No global erosion or blur.
+  recomposeChar();
   // ③ 下沿是不是"被切断"的
   try {
     const c = chCanvas, g = c.getContext('2d', { willReadFrequently: true });
@@ -2435,7 +2730,7 @@ function autoPrepareChar(){
   if (out.cut !== null || out.trimmed){
     let ok = false;
     try { const b = CUT.contentBounds(chCanvas, 8); ok = !!b && b.w >= 8 && b.h >= 8; } catch (e) {}
-    if (!ok){ chBase = before; chCanvas = copyOf(before); out.cut = null; out.trimmed = false; out.half = false; }
+    if (!ok){ chCut = before; chCropNorm = null; recomposeChar(); out.cut = null; out.trimmed = false; out.half = false; }
   }
   return out;
 }
@@ -2445,8 +2740,13 @@ function autoPrepareChar(){
  *   理由：那张卡片在闸门后面弹出来没人看得见；而 ③ 已经能自动判断（默认素材就是下沿被切的半身），
  *   之后在「摆位」里随时能改。用户自己点/自己导进来的图仍然照问。
  */
-function loadChar(url, name, idx, auto){
+let chLoadSerial=0;
+function loadChar(url, name, idx, auto, file){
+  const request=++chLoadSerial;
+  return new Promise(resolve=>{
   chName = name; chSel = idx; syncChRow();
+  // 只记引用，不解码、不复制像素。素材库那条路没有 File，就留着 url 需要时再取。
+  chSrc = { blob: file || null, url: file ? '' : url, name: name || '', w: 0, h: 0 };
   chNote(t('note.chLoad'));
   // 导入之后先问一句「全身还是半身」—— 素材库点选和本地文件这两条路都汇到这里，
   // 所以挂在这儿一处就够，两条路都弹。**只是问，不改任何状态**：
@@ -2454,15 +2754,18 @@ function loadChar(url, name, idx, auto){
   if (!auto) showKind();
   const img = new Image();
   img.onload = () => {
+    if(request!==chLoadSerial){resolve(false);return;}
+    use3D=false;$('t3d').classList.remove('on');stopMotion3dLoop();
+    if(M3D && M3D.motionPlaying)M3D.pauseMotion(true);
     setCharset(img);
     // ★ 自动预处理（抠底 / 裁边 / 猜半身）—— 见 autoPrepareChar 的抬头注释
     const prep = (window.__NO_AUTOPREP ? { cut: null, trimmed: false, half: false } : autoPrepareChar());
-    let msg = t('note.chLoaded', name, img.naturalWidth, img.naturalHeight) + '<br>' + t('note.chHint');
+    const safeName=String(name).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    let msg = t('note.chLoaded', safeName, img.naturalWidth, img.naturalHeight) + '<br>' + t('note.chHint');
     const acts = [];
     if (prep.cut !== null) acts.push(t('note.autoCut', (prep.cut * 100).toFixed(0)));
     if (prep.trimmed) acts.push(t('note.autoTrim'));
     if (prep.soft) acts.push(t('note.autoSoft'));
-    if (prep.blur) acts.push(t('note.autoBlur'));
     if (acts.length) msg += '<br>' + acts.join('　');
     chNote(msg);
     // 自己带图进来的（idx = -1）多半背景不干净 —— 把「修饰立绘」替他展开。
@@ -2474,11 +2777,14 @@ function loadChar(url, name, idx, auto){
       chNote(msg + '<br>' + t('note.halfAuto'));
     }
     draw();
+    try { syncOutRow(); } catch (e) {}
     // 选择器还开着就先不弹（两张卡片会叠在同一处）—— 等选完那一句里再弹
     if (!auto && (!kindEl || kindEl.hidden)) showTip();
+    resolve(true);
   };
-  img.onerror = () => { chBase = chCanvas = null; chNote(t('note.chFail')); draw(); };
+  img.onerror = () => { if(request===chLoadSerial){chBase = chCanvas = chCut = null; chCropNorm = null; chNote(t('note.chFail')); draw();}resolve(false); };
   img.src = url;
+  });
 }
 
 // ── 全身 / 半身：导入立绘之后，先把**默认走哪条路**定下来 ────────────
@@ -2553,7 +2859,9 @@ function syncSizeSliders(){
  *               （卡片留着让用户确认/改；回执由调用方补，因为要带上"自动做了什么"） */
 function applyCharKind(kind, quiet){
   const half = kind === 'half';
+  S.charKind = half ? 'half' : 'full';
   if (half){
+    S.shot = '腰上';
     S.mode = 'free';        // 切口压在框边上，不是踩地
     // ★ 半身**默认不贴边**，位置全归用户。
     //
@@ -2567,13 +2875,13 @@ function applyCharKind(kind, quiet){
     S.edgeBar = 0;
     S.sizePct = 60;         // 一个合理的初始大小，之后拖「大小」随便改
     // 仍然配「自由」：满幅的框下边在屏幕外，位置不好对。
-    S.frame = '自由';
+    setFrame('自由');
   } else {
     S.mode = 'ground';      // 脚踩地面
     S.shot = '全身';        // 整张图从头顶到脚，下沿就是地面
     S.edgeBar = 0;          // 贴地模式下贴边没意义（位置是投影算出来的）
     // 全身配满幅：全靠整块画幅才有地方站下一个人（横屏尤其）
-    S.frame = '满幅';
+    setFrame('满幅');
   }
   renderFrameRow();         // 画幅高亮跟着走 —— 上面直接写了 S.frame，不刷就是旧的
   syncSizeSliders();
@@ -2630,17 +2938,20 @@ if (LIB.characters.length) loadChar('./' + LIB.characters[0].file, LIB.character
 
 $('fCh').addEventListener('change', e => {
   const f = e.target.files && e.target.files[0];
-  if (f) loadChar(URL.createObjectURL(f), f.name, -1);
+  if (f) loadChar(URL.createObjectURL(f), f.name, -1, false, f);
 });
 
 $('cutSolid').onclick = () => {
   if (!chBase) return chNote(t('note.chNone'));
   if (!CUT)    return chNote(t('note.chFail'));
-  const c = copyOf(chBase);
+  // ★ 从 chCut（抠图结果，未裁）重算。cutSolidBg 只写 alpha，而且是 `min(旧, 新)`，
+  //   所以连按不会越抠越小；从 chCut 而不是 chBase 出发，也不会把裁切叠加两次。
+  const c = copyOf(chCut);
   const r = CUT.cutSolidBg(c, { tol: 32, feather: 1.2 });
   if (r === null){ chNote(t('note.notSolid')); return; }
-  chBase = c;                       // 抠完的结果成为新的基准（裁边接着从它来）
-  chCanvas = copyOf(c); draw();
+  chCut = c;
+  retrimCut();                      // 抠完重新贴边裁一次（和自动预处理同一条路）
+  recomposeChar(); draw();
   chNote(t('note.cutSolid', (r*100).toFixed(0)));
 };
 /**
@@ -2660,6 +2971,7 @@ $('cutAi').onclick = async () => {
   if (!CUT || !CUT.animeCut) return chNote(t('note.chFail'));
   if ($('cutAi').dataset.busy) return;              // 防连点：一次只能跑一个
   $('cutAi').dataset.busy = '1';
+  const sourceVersion=chLoadSerial;
   const t0 = Date.now();
   const prog = $('aiProg'), ptxt = $('aiTxt');
   const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
@@ -2693,16 +3005,24 @@ $('cutAi').onclick = async () => {
     if (prog){ prog.hidden = false; prog.classList.add('run'); }
     lastStage = t('note.aiPrep'); paint();
     tick = setInterval(paint, 500);      // 主线程被推理占住时这个也不会跳 —— 见上面注释
-    const c = copyOf(chBase);
+    // ★ 固定读**原图**，不读 chBase。原来这里读 chBase，而 chBase 会被上一次 AI 结果覆盖，
+    //   于是「连按两次 AI」= 在已经乘过一次 alpha 的图上再乘一次 → 边缘持续侵蚀、发丝变细；
+    //   换模型 A→B→A 也回不到第一次的结果。原图只读，重算就真的是重算。
+    const c = copyOf(chOrig || chBase);
     // onProgress(stage, 比例|null, 已收字节, 总字节) —— 比例是 null 就得报 MB，见上面
-    const r = await CUT.animeCut(c, (stage, f, got) => {
+    const segment = window.ARCAM_SEG ? window.ARCAM_SEG.cut : CUT.animeCut;
+    const r = await segment(c, (stage, f, got) => {
       lastStage = stage; lastF = f; lastGot = (got == null ? null : got);
       paint();
-    });
+    }, $('segModel') ? $('segModel').value : 'anime');
+    if(sourceVersion!==chLoadSerial){chNote(t('note.aiStale'));return;}
     if (!r || !r.canvas) throw new Error('没有输出');
     if (r.fg < 0.02) throw new Error(t('note.aiNothing'));
-    chBase = r.canvas;                  // 抠完的结果成为新的基准（裁边接着从它来）
-    chCanvas = copyOf(r.canvas); draw();
+    // r.canvas 是"原图 + AI alpha"的合成结果（含边缘去染边），它就是新的抠图结果。
+    // 注意它是**整张原图**的尺寸，不带裁切 —— 裁切单独记在 chCropNorm 里。
+    chCut = r.canvas;
+    retrimCut();                        // 重新贴边裁一次
+    recomposeChar(); draw();
     // ⚠ 百分比要 toFixed —— 直接塞原始浮点会打印成 39.660072326660156%
     chNote(t('note.aiDone', (r.fg * 100).toFixed(1), ((Date.now() - t0) / 1000).toFixed(1)));
   } catch (e) {
@@ -2756,6 +3076,7 @@ $('cutFile').onchange = async () => {
     //   摆着它是为了让"在做什么"这句话至少出现过，不是假装进度。
     tick = setInterval(paint, 500);
     const r = await CUT.importModel(f, (s) => { stage = s; paint(); });
+    if(window.ARCAM_SEG)await window.ARCAM_SEG.invalidate('fast');
     chNote(t('note.impOk', (r.size / 1048576).toFixed(1), r.saved ? '' : t('note.impNoSave')));
     draw(); syncLive();
   } catch (e) {
@@ -2772,17 +3093,20 @@ $('cutFile').onchange = async () => {
 $('trimBtn').onclick = () => {
   if (!chBase) return chNote(t('note.chNone'));
   if (!CUT)    return chNote(t('note.chFail'));
-  const c = copyOf(chBase);         // 每次都从基准重来 —— 连按不会越裁越小
+  // 从 chCut（未裁的抠图结果）算 —— 连按不会越裁越小
+  const c = chCut;
   const r = CUT.contentBounds(c, 8);
   if (!r){ chNote(t('note.allTrans')); return; }
   if (r.w >= c.width-1 && r.h >= c.height-1){ chNote(t('note.noMargin')); return; }
-  chCanvas = CUT.cropToCanvas(c, r).canvas;
+  chCropNorm = normCropOf(c, r);
+  recomposeChar();
   draw();
   chNote(t('note.trimmed', c.width, c.height, chCanvas.width, chCanvas.height));
 };
 $('chReset').onclick = () => {
   if (!chOrig) return chNote(t('note.chNone'));
-  chBase = copyOf(chOrig); chCanvas = copyOf(chOrig); draw();
+  // 只把「抠图结果」和「裁切」恢复到原图状态 —— 摆位、背景、构图一个字都不动。
+  chCut = copyOf(chOrig); chCropNorm = null; recomposeChar(); draw();
   chNote(t('note.chReset'));
 };
 
@@ -3114,6 +3438,7 @@ function footPrint(colR, colG, colB){
 
 function drawContactShadow(g, c){
   if (!LIGHT_SHD) return;
+  if (S.charKind === 'half' || S.shot !== '全身') return;
   if (S.mode !== 'ground') return;      // 不知道地面在哪就不画（见上面 ⚠）
   if (c.w < 14) return;
   // ★★ 为什么不用 multiply（试过了，在这个架构上根本行不通）：
@@ -3133,24 +3458,43 @@ function drawContactShadow(g, c){
   const lumS = clampN(LIGHT.lum, 0.04, 1) * SH_DARK;
   const rb = LIGHT.ok ? Math.sqrt(Math.max(0.05, LIGHT.r) / Math.max(0.05, LIGHT.b)) : 1;
   const q = (v) => Math.round(clampN(v, 0, 1) * 255 / 6) * 6;    // 量化，免得每帧重算
-  const colR = q(lumS * rb), colG = q(lumS), colB = q(lumS / rb);
+  const colR = q(LIGHT.ok ? LIGHT.groundR * SH_DARK : lumS * rb);
+  const colG = q(LIGHT.ok ? LIGHT.groundG * SH_DARK : lumS);
+  const colB = q(LIGHT.ok ? LIGHT.groundB * SH_DARK : lumS / rb);
   const fp = footPrint(colR, colG, colB);
   if (!fp) return;
+  g.save();g.globalAlpha *= SHADOW_GAIN;
   const sw = c.w, shh = c.w * SH_THICK;
   // 峰值那条线压在"立绘下沿"上 —— 那就是脚踩地面的地方
   const top = c.h/2 - shh * SH_PEAK;
   g.drawImage(fp, -sw/2, top, sw, shh);
+  g.save(); g.globalAlpha *= .55;
+  g.drawImage(fp,-sw*.47,c.h/2-shh*.28*SH_PEAK,sw*.94,shh*.28);
+  g.restore();
+  g.restore();
 }
 
 /** 把立绘画到任意一块 context 上。取景器和出图走**同一条**，位置才分毫不差 */
 function drawCharTo(g){
   const c = currentPlacement();
   if (!c || !chCanvas) return;
+  // 导出时换成**按输出尺寸重算过的高清立绘**（见 buildCharHi）；预览永远是工作副本。
+  const charSrc = exportCharSrc || chCanvas;
   g.save();
   g.translate(c.u, c.v);
   g.rotate(c.rot);
   // ⚠ 必须在 litChar() 之前填 —— 颗粒的缩放补偿要靠它（见 bakeLit）
-  litScale = chCanvas.width ? c.w / chCanvas.width : 1;
+  litScale = charSrc.width ? c.w / charSrc.width : 1;
+  const detail=$('sourceDetail');
+  if(detail){
+    // ★ 同时说清"原图多大、实际用的是多大"。只看工作尺寸的话，
+    //   用户不知道画质是被自己放大搞坏的，还是被导入时的降采样砍掉的（方案 §6.4）。
+    const shrunk = chSrc.w && (chSrc.w > chCanvas.width + 1 || chSrc.h > chCanvas.height + 1);
+    const message=t('fusion.detail',chCanvas.width,chCanvas.height,litScale.toFixed(2))+
+      (shrunk ? ' '+t('fusion.sourceScaled',chSrc.w,chSrc.h) : '')+
+      (litScale>1.2 ? ' '+t('fusion.enlarged') : '');
+    if(detail.textContent!==message)detail.textContent=message;
+  }
   // ★ 缩画质量。canvas 默认是 'low' —— 立绘从 1500px 缩到几百 px 时，
   //   'low' 会**丢采样**而不是平均，出来一圈锯齿和噪点，看着就是"越小越糊"。
   //   实测关掉颗粒时横向相邻差：画成 66px 时 15.8、394px 时 5.5 —— 越小的反而越高，
@@ -3161,14 +3505,24 @@ function drawCharTo(g){
   // （studio 上一版就栽在这：预览画了、导出漏了，合成图比眼睛看到的少一层接地感。）
   drawContactShadow(g, c);
   // 用烘好的"匹配过光线"的那版；没开光线匹配时 litChar() 直接返回原图
-  g.drawImage(litChar(), -c.w/2, -c.h/2, c.w, c.h);
+  g.drawImage(litChar(charSrc), -c.w/2, -c.h/2, c.w, c.h);
   g.restore();
 }
 
 function syncModeRow(){
-  $('mGround').classList.toggle('on', S.mode !== 'free');
-  $('mFree').classList.toggle('on', S.mode === 'free');
+  // ★ 能力驱动，不是"if (is3D) 到处补"：3D 没有"画面自由摆位"这件事 ——
+  //   MMD 的位置由世界坐标（距离 d / 左右 x / 身高 Hp）决定，freeP 一个字节都不读。
+  //   原来那颗「自由」按钮在 3D 下**可点、但点完画面完全不动**（点了先被 1831 那行改回 ground，
+  //   或者改成 free 之后渲染器根本不看），用户只能理解为"坏了"。
+  //   首期直接不显示；要支持"把 MMD 当贴纸拖"，得另做一个屏幕空间的 3D 模式（方案 §9.2），
+  //   而不是复用 freeP 再让渲染器忽略它。
+  const canFree = !use3D;
+  if (!canFree && S.mode === 'free') S.mode = 'ground';   // 进 3D 时兜底，不留非法组合
   const free = S.mode === 'free';
+  const freeBtn = $('mFree');
+  if (freeBtn){ freeBtn.style.display = canFree ? '' : 'none'; freeBtn.disabled = !canFree; }
+  $('mGround').classList.toggle('on', !free);
+  if (freeBtn) freeBtn.classList.toggle('on', free);
   $('szRow').style.display = free ? '' : 'none';    // 自由：占画面高%；贴地：尺寸由投影定
   $('scRow').style.display = free ? 'none' : '';    // 贴地：纯大小系数（自由模式下它没意义）
   if (free) resnap();                               // 切进自由模式时把已有的贴边补上
@@ -3367,7 +3721,10 @@ async function zipStore(files){
  * 瞬时用户激活还剩多少，弹不出来的时候只剩长按。
  */
 let lastPreview = null;
+let toastTimer=0;
 function saveNote(msg, imgUrl){
+  const toast=$('actionToast');
+  if(toast && msg){toast.textContent=msg;toast.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{toast.hidden=true;},6500);}
   const el = $('saveNote');
   if (!el) return;
   if (lastPreview && lastPreview !== imgUrl){
@@ -3392,7 +3749,8 @@ function saveNote(msg, imgUrl){
 
 /** 保存结果的回执文案。存的是 TXT 的 key，取的时候才翻（切语言立刻跟着变） */
 const SAVED = { share:'note.savedShare', picker:'note.savedPicker',
-                download:'note.savedDownload', cancel:'note.savedCancel' };
+                download:'note.savedDownload', native:'note.savedNative', nativeLegacy:'note.savedNativeLegacy',
+                cancel:'note.savedCancel', failed:'note.savedFailed' };
 /** 存一个文件：分享 → 选目录 → a[download] 三档 */
 /** blob → base64（不含 data: 前缀）。只在安卓壳那条路上用得到。 */
 function blobToB64(blob){
@@ -3414,16 +3772,27 @@ async function saveBlob(blob, filename){
   //   所以桥放最前面：blob 转 base64 分片递过去，由原生写进文件。
   //   ⚠ 分片是因为一张 1920×1080 的 JPEG 转出来 base64 近 3MB，
   //     一次过 JS 桥容易在低端机上炸或者被截断。
-  try {
-    if (window.ArcLog && window.ArcLog.saveChunk && window.ArcLog.saveEnd){
+  //   ★ 2026-11-05 修：原生**明确有桥**但写失败时，必须**返回失败**，不能往下溜。
+  //     原来的行为是 `if (p) return …` 不成立就继续走 navigator.share / <a download>，
+  //     最后无条件 `return 'download'` —— 于是"原生写盘失败"在界面上显示成"已下载"。
+  //     这是最坏的一类 bug：用户以为存好了，关掉页面就没了。
+  //     现在：有桥就以桥的结论为准；失败就报失败（可重试）；只有桥**不存在**时才用浏览器那三条。
+  const hasBridge = !!(window.ArcLog && window.ArcLog.saveChunk && window.ArcLog.saveEnd);
+  if (hasBridge){
+    let path = null, err = null;
+    try {
       const b64 = await blobToB64(blob);
       const CH = 256 * 1024;
       for (let i = 0; i < b64.length; i += CH) window.ArcLog.saveChunk(filename, b64.slice(i, i + CH));
-      const p = window.ArcLog.saveEnd(filename);
-      arcLog('saved', { name: filename, bytes: blob.size, path: p || null });
-      if (p) return 'download';
-    }
-  } catch (e){ arcLog('save_fail', { name: filename, err: String(e && e.message || e) }); }
+      path = window.ArcLog.saveEnd(filename);
+    } catch (e){ err = e; }
+    arcLog('saved', { name: filename, bytes: blob.size, path: path || null,
+                      err: err ? String(err.message || err) : null });
+    if (path) return String(path).startsWith('Download/') ? 'native' : 'nativeLegacy';
+    // 桥在、但没拿到路径 = 没写成。用户取消与写盘失败在原生侧都表现为"没有路径"，
+    // 这里统一按失败处理 —— 宁可让用户看到"保存失败"，也不要显示一个假的"已保存"。
+    return 'failed';
+  }
 
   // 下面这三条是浏览器里的正路，一个字没动
   let file = null;
@@ -3457,10 +3826,15 @@ async function saveAll(files, zipName, previewUrl){
   const many = files.length > 1;
   const blob = many ? await zipStore(files) : files[0].blob;
   const name = many ? zipName : files[0].name;
-  let r = 'download';
-  try { r = await saveBlob(blob, name); } catch (e){ r = 'download'; }
-  const lbl = t(SAVED[r] || 'note.savedCancel');
-  // 分享/选目录成功就不摆长按退路了；其余情况一律摆上
+  // ★ 异常不再伪装成 'download'：抛了就是没存成。
+  let r = 'failed';
+  try { r = await saveBlob(blob, name); }
+  catch (e){ arcLog('save_fail', { name, err: String(e && e.message || e) }); r = 'failed'; }
+  // 失败要说清楚"没写成、可以重试"，不能只丢一个"保存失败"让人猜。
+  const lbl = r === 'failed'
+    ? t('note.savedFailed') + '：' + t('note.savedFailedHint')
+    : t(SAVED[r] || 'note.savedCancel');
+  // 分享/选目录成功就不摆长按退路了；其余情况一律摆上（失败时尤其需要这条退路）
   saveNote(many ? t('note.savedMany', lbl, name, files.length) : t('note.savedOne', lbl, name),
            (r === 'share' || r === 'picker') ? null : previewUrl);
   return r;
@@ -3475,12 +3849,174 @@ async function saveAll(files, zipName, previewUrl){
  */
 // 出图那一帧采到的光。照片和立绘层**共用同一套** —— 分别采的话两张图会配不同的光，
 // 叠回去就不是逐像素对得上了（导出流程的核心承诺就是"严丝合缝"）。
-let LAST_SHOT_LIGHT = null;
+let LAST_SHOT_LIGHT = null, LAST_SHOT_LAYER = null;
 function buildShotCanvas(){
   const r = composeShot(v);
   LAST_SHOT_LIGHT = r.light;
   return r;
 }
+
+// ── 输出规划（ExportPlan）──────────────────────────────────────────────
+/**
+ * 出图到底多少像素，是**作品设置**，不是渲染器顺手决定的。
+ * 没有这一层时：`scenePhotoCanvas` 被缩到 2560，`cv` 也就那么大，导出再大也只能放大这张代理图。
+ *
+ * 这里只算"该出多大"，真正按这个尺寸画由 `withExportScale()` 完成 ——
+ * 渲染器仍然只认"给我的目标尺寸"，不去读这个对象。
+ */
+const EXPORT = {
+  sizeMode: 'auto',        // 'auto' | 'x1' | 'x2'
+  maxPixels: 12000000,     // 输出像素上限：1200 万（RGBA 一份约 46MB，加上各层要翻几倍）
+  scaleCap: 2,             // 自动模式的倍数上限：再大只有背景受益，人物只会被拉软
+  jpegQuality: 0.95,
+};
+
+/** 这一张该出多少像素。纯计算，不改任何状态。 */
+function planExport(){
+  const w0 = cv.width, h0 = cv.height;
+  const base = Math.max(1, w0 * h0);
+  const want = EXPORT.sizeMode === 'x1' ? 1 : Math.min(EXPORT.scaleCap, EXPORT.sizeMode === 'x2' ? 2 : EXPORT.scaleCap);
+  // 素材能支持的等比倍数：实时相机只有视频帧，没有更高分辨率可用 → 1×
+  let bySource = 1;
+  if (scenePhoto && scenePhoto.naturalWidth){
+    bySource = Math.min(scenePhoto.naturalWidth / w0, scenePhoto.naturalHeight / h0);
+  }
+  const byBudget = Math.sqrt(EXPORT.maxPixels / base);
+  const k = Math.max(1, Math.min(want, bySource, byBudget));
+  let capped = null;
+  if (k < want - 1e-3) capped = (byBudget < bySource - 1e-3) ? 'budget' : 'source';
+  return { scale: k, width: Math.max(1, Math.round(w0 * k)), height: Math.max(1, Math.round(h0 * k)),
+           capped, video: !scenePhoto };
+}
+
+/**
+ * 在 k 倍的坐标空间里跑一次 fn。
+ * ⚠ 为什么敢临时改 `cv` 尺寸：这一页所有投影/裁切都从 `cv.width/height` 推出来，
+ *   改尺寸等于**整体等比缩放**，几何关系天然一致 —— 比另写一套"导出坐标系"可靠得多。
+ * ⚠ 代价：改 canvas 尺寸会清空画布，所以 finally 里必须还原**并重绘**，
+ *   否则用户看到的是一块空白（真踩过）。
+ * ⚠ 必须同步执行：fn 里不能 await，否则中间那一帧预览是错的。
+ */
+function withExportScale(k, fn){
+  if (!(k > 1.0001)) return fn();
+  const w0 = cv.width, h0 = cv.height;
+  cv.width = Math.max(1, Math.round(w0 * k));
+  cv.height = Math.max(1, Math.round(h0 * k));
+  try { return fn(); }
+  finally {
+    cv.width = w0; cv.height = h0;
+    try { draw(); } catch (e) {}
+  }
+}
+
+// ── 导出用的高清立绘 ────────────────────────────────────────────────────
+/**
+ * 导出时"人物放大 k×"是这一版最诚实的短板：放大不会多出像素。
+ * 这里把它补上 —— 用**原图**（全分辨率）+ **同一份抠图 alpha** + **同一个裁切矩形**
+ * 在更高分辨率上把立绘重算一遍。这不是放大，是同一套操作在更密的采样上重做。
+ *
+ * ⚠ 前提：抠图 alpha 本身仍受工作分辨率限制（chCut 是 chOrig 尺寸），
+ *   所以边缘的锐度上限还是"工作分辨率"，只是 RGB 细节回到原图。要彻底解决得让
+ *   分割模型在原图上跑 —— 那是另一件事，别在这里假装已经做到。
+ */
+let exportCharSrc = null;
+
+/** 把原始素材重新解码成 Image（本地 File 或素材库 URL 两条路） */
+async function charSourceImage(){
+  const mk = src => new Promise((res, rej) => {
+    const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode fail')); i.src = src;
+  });
+  try {
+    if (chSrc.blob){
+      const u = URL.createObjectURL(chSrc.blob);
+      try { return await mk(u); } finally { URL.revokeObjectURL(u); }
+    }
+    if (chSrc.url) return await mk(chSrc.url);
+  } catch (e) { arcLog('char_src_fail', { err: String(e && e.message || e) }); }
+  return null;
+}
+
+/**
+ * 生成/复用高清立绘。返回 null 表示"没有更高分辨率可用"（调用方继续用工作副本）。
+ * @param targetW 期望的宽度：人物在输出里会被画成多宽
+ */
+async function buildCharHi(targetW){
+  if (!chCut || !chCut.width) return null;
+  const key = [chCutSeq, Math.round(targetW), chSrc.w, chSrc.h].join('|');
+  if (chHi && chHiKey === key) return chHi;
+  // 原图并不比工作副本大 —— 重算没有意义，别白烧内存
+  if (!chSrc.w || chSrc.w <= chCanvas.width + 1) return null;
+  const img = await charSourceImage();
+  if (!img || !img.naturalWidth) return null;
+  // ⚠ 这里要传**最长边**的上限，不是目标宽度：竖图的高度才是长边，
+  //   把宽度当 maxDim 传进去会把整张图缩得比工作副本还小（真踩过）。
+  //   先按"宽度至少要到 targetW"折算成长边，再由像素预算兜底。
+  const needW = Math.max(chCanvas.width, Math.round(targetW));
+  const longSide = Math.max(img.naturalWidth, img.naturalHeight) * (needW / img.naturalWidth);
+  const hi = decodeCharCanvas(img, Math.max(1, Math.round(longSide)), EXPORT.maxPixels);
+  // 把抠图结果只当**蒙版**用：destination-in 只吃 alpha，RGB 保留原图的
+  const g = hi.getContext('2d');
+  g.globalCompositeOperation = 'destination-in';
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(chCut, 0, 0, hi.width, hi.height);
+  g.globalCompositeOperation = 'source-over';
+  // ⚠ 要跟**裁完之后**的宽度比：工作副本是裁过的（透明边已经去掉），
+  //   拿它跟未裁的 chCut 比会把"确实更大"误判成"没更大"。
+  const out = cropByNorm(hi, chCropNorm);   // 同一个归一化裁切，换分辨率照样成立
+  if (!out || out.width <= chCanvas.width + 1) return null;
+  chHi = out;
+  chHiKey = key;
+  return chHi;
+}
+
+/** 导出前准备：把 exportCharSrc 指向高清副本（失败就保持 null，静默回退） */
+async function prepareExportChar(plan){
+  exportCharSrc = null;
+  if (!chCanvas || !chCanvas.width) return;
+  try {
+    const hi = await buildCharHi(Math.round(chCanvas.width * plan.scale));
+    if (hi) exportCharSrc = hi;
+  } catch (e) { arcLog('char_hi_fail', { err: String(e && e.message || e) }); }
+}
+/** 导出后清掉借用状态（chHi 本身留着，下次导出可复用） */
+function releaseExportChar(){
+  if (!exportCharSrc) return;
+  exportCharSrc = null;
+  litFor = null; litSig = '';      // 让下一帧预览重新烘工作副本
+}
+
+/** 按当前输出设置出一张合成图。**同步**，返回 {canvas, rect, light}。 */
+function buildShotAt(plan){
+  return withExportScale(plan.scale, () => {
+    const r = composeShot(v);
+    LAST_SHOT_LIGHT = r.light;
+    return r;
+  });
+}
+
+/** 输出尺寸那一格：按钮高亮 + 一句"这一张到底多大" */
+function syncOutRow(){
+  for (const [id, mode] of [['outAuto','auto'], ['out1x','x1'], ['out2x','x2']]){
+    const b = $(id); if (b) b.classList.toggle('on', EXPORT.sizeMode === mode);
+  }
+  const info = $('outInfo'); if (!info) return;
+  if (!cv.width || !cv.height) return;      // 画布还没起来，先不显示一个假的 1×1
+  const p = planExport();
+  const up = (p.scale * litScale);
+  // 有原图可重算时，人物**不会**被放大 —— 说"放大 k×"就成了假话。
+  const canHi = !!(chSrc.w && chCanvas && chSrc.w > chCanvas.width * 1.02) && !p.video;
+  let msg = canHi ? t('out.infoHi', p.width, p.height)
+                  : t('out.info', p.width, p.height, up.toFixed(2));
+  if (p.capped === 'source') msg += ' ' + t('out.limitSource');
+  else if (p.capped === 'budget') msg += ' ' + t('out.limitBudget');
+  if (p.video) msg = t('out.video');
+  if (info.textContent !== msg) info.textContent = msg;
+}
+for (const [id, mode] of [['outAuto','auto'], ['out1x','x1'], ['out2x','x2']]){
+  const b = $(id);
+  if (b) b.onclick = () => { EXPORT.sizeMode = mode; syncOutRow(); };
+}
+syncOutRow();
 
 /**
  * 出图那一遍变换的**唯一一份实现**：拍两张图跑的都是它。
@@ -3491,135 +4027,14 @@ function buildShotCanvas(){
  *   src=null 这条路上**没有**视频帧、没有地面网格、没有地平线、没有人体骨架，
  *   也没有取景框压暗和三分线 —— 那些只在实时预览的 draw() 里画，出不来的。
  */
-// ── 环境融合 ①：把 3D 图层往"实拍画面"的色域上拉一档 ─────────────────────
-// 为什么这是第一刀：「贴纸感」最大的来源是**色温/色调不匹配** —— 模型永远同一套颜色，
-//   而房间的色温一直在变。把它锚到周围画面，人眼立刻觉得"光打在同一个空间里"。
-// 只做**均值平移**（`in + (μ画面 - μ模型) × k`），不动方差：二次元的固有色不能被洗掉。
-//   k：0 = 不生效，1 = 全染成照片色。**0.35 起步，上限 0.4。**
-// ⚠ 自守卫：包围盒外那一圈如果全是透明的，说明这条路上没有实拍帧（立绘层那条路），直接不做。
-let TONE_ON = false, TONE_K = 0.35;
-function toneMatchedLayer(layer, bgCtx){
-  const w = layer.width, h = layer.height;
-  let d;
-  try { d = layer.getContext('2d').getImageData(0, 0, w, h); } catch (e) { return null; }
-  const A = d.data;
-  // 1) 模型包围盒 + 模型自己的均值（只算不透明像素）
-  let x0 = w, y0 = h, x1 = -1, y1 = -1, n = 0, mr = 0, mg = 0, mb = 0;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = (y * w + x) * 4;
-    if (A[i + 3] < 8) continue;
-    if (x < x0) x0 = x; if (x > x1) x1 = x;
-    if (y < y0) y0 = y; if (y > y1) y1 = y;
-    mr += A[i]; mg += A[i + 1]; mb += A[i + 2]; n++;
-  }
-  if (n < 500) return null;
-  mr /= n; mg /= n; mb /= n;
-  // 2) 画面背景的均值：包围盒外扩 20% 那一圈（模型自己占的那块要跳过）
-  const pad = Math.round(Math.max(x1 - x0, y1 - y0) * 0.2) + 8;
-  const rx = Math.max(0, x0 - pad), ry = Math.max(0, y0 - pad);
-  const rw = Math.min(w, x1 + pad) - rx, rh = Math.min(h, y1 + pad) - ry;
-  if (rw < 4 || rh < 4) return null;
-  let bd;
-  try { bd = bgCtx.getImageData(rx, ry, rw, rh); } catch (e) { return null; }
-  const B = bd.data;
-  let br = 0, bg = 0, bb = 0, bn = 0;
-  for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) {
-    const gx = rx + x, gy = ry + y;
-    if (gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1) continue;
-    const i = (y * rw + x) * 4;
-    if (B[i + 3] < 8) continue;
-    br += B[i]; bg += B[i + 1]; bb += B[i + 2]; bn++;
-  }
-  if (bn < 500) return null;                 // 没有背景 → 不做（立绘层那条路）
-  br /= bn; bg /= bn; bb /= bn;
-  // 3) 影调包络：算模型层与背景的**亮度 P5/P95（黑位/白位）**。
-  //    只做均值平移的话，暗房间里模型只是"被调暗了一点"，明暗包络还是另一个世界的 ——
-  //    实测症状：图2 全黑房间里模型像"一张被调暗的平面图"。
-  //    所以 = **均值平移（管色调）** + **范围重映射（管明暗包络）**，两步各带混合系数。
-  //    kTone：0 = 不做，1 = 完全对齐。**0.4 起步，暗场景降到 0.3**（否则 toon 分档被压平）。
-  const pct = (isModel) => {
-    const hist2 = new Uint32Array(256);
-    let tot = 0;
-    if (isModel) {
-      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-        const i = (y * w + x) * 4;
-        if (A[i + 3] < 8) continue;
-        hist2[(A[i] * 0.299 + A[i + 1] * 0.587 + A[i + 2] * 0.114) | 0]++; tot++;
-      }
-    } else {
-      for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) {
-        const gx = rx + x, gy = ry + y;
-        if (gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1) continue;
-        const i = (y * rw + x) * 4;
-        if (B[i + 3] < 8) continue;
-        hist2[(B[i] * 0.299 + B[i + 1] * 0.587 + B[i + 2] * 0.114) | 0]++; tot++;
-      }
-    }
-    if (!tot) return [0, 255];
-    let acc = 0, lo = 0, hi = 255;
-    for (let v = 0; v < 256; v++) { acc += hist2[v]; if (acc >= tot * 0.05) { lo = v; break; } }
-    acc = 0;
-    for (let v = 255; v >= 0; v--) { acc += hist2[v]; if (acc >= tot * 0.05) { hi = v; break; } }
-    return [lo, hi];
-  };
-  const [mLo, mHi] = pct(true), [bLo, bHi] = pct(false);
-  const rangeM = Math.max(8, mHi - mLo), rangeB = Math.max(8, bHi - bLo);
-  const kTone = rangeB < 90 ? 0.3 : 0.4;         // 画面本身就极暗时，别把 toon 分档压平
-  const tRange = rangeM + (rangeB - rangeM) * kTone;
-  const tLo = mLo + (bLo - mLo) * kTone;
-  const sc = tRange / rangeM;
-  for (let i = 0; i < A.length; i += 4) {
-    if (A[i + 3] < 8) continue;
-    const L0 = A[i] * 0.299 + A[i + 1] * 0.587 + A[i + 2] * 0.114;
-    const g = L0 > 1 ? ((L0 - mLo) * sc + tLo) / L0 : 1;   // 按亮度比例缩放 → 保住色相
-    A[i]     = Math.max(0, Math.min(255, A[i]     * g + (br - mr) * TONE_K));
-    A[i + 1] = Math.max(0, Math.min(255, A[i + 1] * g + (bg - mg) * TONE_K));
-    A[i + 2] = Math.max(0, Math.min(255, A[i + 2] * g + (bb - mb) * TONE_K));
-  }
-  // 4) 边缘羽化 —— **只碰轮廓，不碰模型内部本来半透明的蕾丝/纱**。
-  //    CG 的边缘是数学精确的，而照片里物体边缘因镜头 PSF/衍射永远有 1~2px 过渡；
-  //    硬边是"贴纸感"的第三大来源。
-  //    判据（和方案一致）：**alpha>8 且 4 邻域里有 alpha<8** 才算轮廓像素。
-  //    做法：只对这些像素做 3×3 高斯（σ≈1）的 **alpha 模糊**，且只往"更透"的方向走（不做锐化）；
-  //          alpha 变低的像素再把 RGB 按比例混向背景色 —— 模拟"半透明边缘透出背景"。
-  const alphaAt = (x, y) => A[(y * w + x) * 4 + 3];
-  const edge = new Uint8Array(w * h);
-  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-    if (alphaAt(x, y) < 8) continue;
-    if (alphaAt(x - 1, y) < 8 || alphaAt(x + 1, y) < 8 || alphaAt(x, y - 1) < 8 || alphaAt(x, y + 1) < 8)
-      edge[y * w + x] = 1;
-  }
-  const before = new Uint8Array(A);        // 模糊必须读**同一份原始 alpha**，否则一圈圈自我叠加
-  let edgeN = 0;
-  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-    const i = y * w + x;
-    if (!edge[i]) continue;
-    let sum = 0, wsum = 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const k2 = (dy === 0 && dx === 0) ? 4 : ((dy === 0 || dx === 0) ? 2 : 1);
-      sum += before[((y + dy) * w + (x + dx)) * 4 + 3] * k2; wsum += k2;
-    }
-    const na = Math.round(sum / wsum), oa = before[i * 4 + 3];
-    if (na >= oa) continue;
-    A[i * 4 + 3] = na;
-    const t = 1 - na / 255;
-    const bi = ((y - ry) * rw + (x - rx)) * 4;
-    if (bi >= 0 && bi + 3 < B.length) {
-      A[i * 4]     = A[i * 4]     * (1 - t) + B[bi]     * t;
-      A[i * 4 + 1] = A[i * 4 + 1] * (1 - t) + B[bi + 1] * t;
-      A[i * 4 + 2] = A[i * 4 + 2] * (1 - t) + B[bi + 2] * t;
-    }
-    edgeN++;
-  }
-  const out = document.createElement('canvas');
-  out.width = w; out.height = h;
-  out.getContext('2d').putImageData(d, 0, 0);
-  window.__tone = { model: [Math.round(mr), Math.round(mg), Math.round(mb)],
-                    bg: [Math.round(br), Math.round(bg), Math.round(bb)],
-                    k: TONE_K, kTone, mLo, mHi, bLo, bHi, sc: +sc.toFixed(3), n, bn, edgeN };
-  return out;
-}
-
+// ── 环境融合（色调匹配）：暂时停用，等做成正式效果再回来 ────────────────────
+// 原实现 `toneMatchedLayer()` 做三件事：模型均值向背景平移、明暗包络(P5/P95)重映射、
+// 轮廓 alpha 羽化并把边缘 RGB 混向背景色。它只在 composeShot 的出图那一遍跑（预览不跑），
+// 于是成片与预览在颜色上必然不同 —— 这正是"预览好好的、拍下来发灰"的来源。
+// 其中"边缘混背景"还有一处机制性错误：先预混背景再走 alpha 合成，等价于 a²F+(1-a²)B。
+// 结论：这不是"参数没调好"，是**位置放错了**。要恢复该能力，必须按 §8.1 把它做成
+// 由效果配置驱动、预览与导出共用同一份输入的正式效果，并保留"强度 0 = 完全旁路"。
+// 在此之前不提供该开关 —— 一个只在导出时生效的隐藏处理，比没有更糟。
 /** 自检用：量"3D 层融进画面"的两条关键指标（方案给的验收指标的代理量）。
  *  ① 方向感 dL_dir = 模型不透明像素亮度的 **P90−P10** —— 平光时≈0，目标 30~80。
  *  ③ 接触暗部 dL_contact = 脚底那一条横带里「正下方」与「往旁边 0.6 身宽」两处的**压暗量**差，目标 8~25。
@@ -3671,30 +4086,49 @@ window.__measure3D = function(){
 };
 
 function composeShot(src, lightM){
+  // ★ 出图尺寸超过代理图时，直接读**原图**（scenePhoto 就是原尺寸的 Image）——
+  //   这才是"细节来自原图"。原来一律用 2560 的代理图，原图 6000×4000 也只剩 2560。
+  //   几何不变：代理图和原图是同一张画面，只是采样密度不同。
+  if (scenePhoto && src){
+    const proxy = $('scenePhotoCanvas');
+    src = (cv.width > proxy.width + 1 || cv.height > proxy.height + 1) ? scenePhoto : proxy;
+  }
   const R = frameRect();
   const full = document.createElement('canvas');
   full.width = cv.width; full.height = cv.height;
   const g = full.getContext('2d');
-  if (src && src.videoWidth) g.drawImage(src, 0, 0, cv.width, cv.height);
+  const hasSource=src && (src.videoWidth || src.naturalWidth || src.width);
+  if (hasSource) g.drawImage(src, 0, 0, cv.width, cv.height);
   // ★ 出图当场再采一次光，量的是**正要导出的这一帧**。
   //   预览用的是平滑值（LIGHT_K=0.12，防闪），但出图不能跟着它 ——
   //   拖着手机转过去、环境变了再按快门时，平滑值还停在上一秒的环境上，导出的照片就配错光。
   //   光的来源：调用方给了就用（立绘层要跟照片**同一套**），没给就当场从这一帧量。
   let m = lightM || null;
-  if (!m && src && src.videoWidth && LIGHT_ON){
+  if (!m && hasSource && LIGHT_ON){
     const reg = clampRegion(lightRegion(), cv.width, cv.height);
     m = measureRegion(full, cv.width, cv.height, reg.sx, reg.sy, reg.sw, reg.sh, 32);
   }
   // 出图和预览走**同一条**：draw3DLayer 画在帧坐标 (0,0)，没就绪就回退 2D。
   // ⚠ withLight 里跑 3D 是关键：照片和立绘层必须配**同一套**光，否则叠回去颜色错开。
-  const paint = () => { TONE_ON = !!src; if (!draw3DLayer(g)) drawCharTo(g); TONE_ON = false; };
+  const subject=document.createElement('canvas');subject.width=cv.width;subject.height=cv.height;
+  const subjectCtx=subject.getContext('2d');
+  const paint = () => {
+    if (!draw3DLayer(subjectCtx,g)) drawCharTo(subjectCtx);
+  };
   if (m) withLight(m, paint);
   else   paint();
+  g.drawImage(subject,0,0);
   const off = document.createElement('canvas');
   off.width  = Math.max(1, Math.round(R.w));
   off.height = Math.max(1, Math.round(R.h));
   // 同一个裁切框、同一个（可能是小数的）偏移 —— 两张图的像素就此一一对应
   off.getContext('2d').drawImage(full, -R.x, -R.y);
+  if(src) {
+    const layer=document.createElement('canvas');layer.width=off.width;layer.height=off.height;
+    layer.getContext('2d').drawImage(subject,-R.x,-R.y);
+    LAST_SHOT_LAYER={canvas:layer,rect:{...R},light:m,
+      motion:use3D&&M3D ? {name:M3D.motionName,time:M3D.motionTime} : null};
+  }
   // 把这一遍实际用到的光带出去 —— 立绘层必须跟照片用**同一套**，
   // 否则两张图叠回去就对不上（测试里的"逐像素一致"就是这么抓到我的）。
   return { canvas: off, rect: R, light: m };
@@ -3706,7 +4140,7 @@ function composeShot(src, lightM){
  * 所以它**不是**原始立绘文件，下游拿到不用再算一遍偏移。
  * 尺寸和 shot_*.jpg 逐像素相同（都是 frameRect 圆整后的那个矩形）。
  */
-function buildCharCanvas(){ return composeShot(null, LAST_SHOT_LIGHT); }
+function buildCharCanvas(){ return LAST_SHOT_LAYER || composeShot(null, LAST_SHOT_LIGHT); }
 
 /**
  * canvas → Blob。一次要出两张图，回调套回调就成金字塔了，包成 Promise。
@@ -3758,6 +4192,8 @@ function buildScene(R, pc){
     // 下游要按同一套复原，就得把它乘回去（character.sizePixel 里已经乘过了，
     // 这一项是留给"想换个数重算"的人）。**新 key**。
     charScale: S.charScale,
+    charKind: S.charKind || (S.shot==='全身'?'full':'half'),
+    fusion: {strength:LIGHT_MIX,shadowStrength:SHADOW_GAIN,light:LIGHT_ON,grain:LIGHT_GRN},
     // 框条吸附（自由模式）。和 studio.html 的 edge 段同形：bar 是编号 0~4，
     // rotationLocked 明说"吸附时旋转被锁成 0" —— 下游不用去猜。**新 key**。
     edge: { bar: S.edgeBar, rotationLocked: !!S.edgeBar },
@@ -3776,6 +4212,8 @@ function buildScene(R, pc){
     mmd: (use3D && M3D && M3D.ready && M3D.srcName) ? {
       model: M3D.srcName,
       pose: M3D.poseNames()[pose3D] || null,
+      motion: LAST_SHOT_LAYER?.motion || {name:M3D.motionName,time:M3D.motionTime},
+      material: M3D.params.material,
       modelHeightM: +M3D.modelHeight().toFixed(4),
       heightM: +(S.Hp * S.charScale).toFixed(4),
       groundPoint: { lateralM: +S.x.toFixed(3), distanceM: +S.d.toFixed(3) },
@@ -3797,18 +4235,27 @@ function buildScene(R, pc){
 $('shot').addEventListener('click', async () => {
   // 按取景框裁切：出图必须和眼睛在框里看到的完全一致。
   // 不裁的话，画面边缘那些"框外已经压暗"的部分会跟着一起出来。
+  // ★ 尺寸来自 planExport()：原图够大就出大图，而不是永远按 2560 的预览尺寸。
+  const plan = planExport();
   let shotCv;
-  try { shotCv = buildShotCanvas().canvas; }   // 立绘读脏了画布也不能把出图废掉
-  catch (e){ saveNote(t('note.shotFail'), null); return; }
+  // 立绘读脏了画布也不能把出图废掉
+  try {
+    await prepareExportChar(plan);                 // 有原图就换高清立绘，没有就静默用工作副本
+    try { shotCv = buildShotAt(plan).canvas; } finally { releaseExportChar(); }
+  }
+  catch (e){ releaseExportChar(); saveNote(t('note.shotFail'), null); return; }
   const name = `shot_${newStamp()}.jpg`;
   try {
-    const b = await toBlobP(shotCv, 'image/jpeg', 0.95);
+    const b = await toBlobP(shotCv, 'image/jpeg', EXPORT.jpegQuality);
     if (!b){ saveNote(t('note.shotFail'), null); return; }
-    let r = 'download';
-    try { r = await saveBlob(b, name); } catch (e){ r = 'download'; }
-    // 回执点名文件本身：用户才知道存下来的是什么、叫什么
-    const lbl = t(SAVED[r] || 'note.savedCancel');
-    saveNote(t('note.savedOne', lbl, name),
+    // ★ 不再把异常/桥失败当成 'download' —— 见 saveBlob 的注释。
+    let r = 'failed';
+    try { r = await saveBlob(b, name); }
+    catch (e){ arcLog('save_fail', { name, err: String(e && e.message || e) }); r = 'failed'; }
+    // 回执点名文件本身 + 实际像素：用户才知道存下来的是什么、多大
+    const lbl = r === 'failed' ? t('note.savedFailed') + '：' + t('note.savedFailedHint')
+                               : t(SAVED[r] || 'note.savedCancel');
+    saveNote(t('note.savedOne', lbl, `${name}（${shotCv.width}×${shotCv.height}）`),
              (r === 'share' || r === 'picker') ? null : URL.createObjectURL(b));
   } catch (e){ saveNote(t('note.shotFail'), null); }
 });
@@ -3818,16 +4265,28 @@ $('shot').addEventListener('click', async () => {
  * 手机上分三次存要点三次、iOS 还会拦后面的，所以这一包仍然打包。
  */
 $('exPack').addEventListener('click', async () => {
-  const R = frameRect();
-  let shotCv, charCv = null;
+  // ★ 三个文件必须在**同一个输出空间**里：同一份 plan、同一套裁切框。
+  //   原来 shot 和 character 都在预览尺寸下出，一旦出图放大而图层不放大，
+  //   叠回去就不是逐像素对得上了 —— 那正是这个包的唯一用途。
+  const plan = planExport();
+  let R = null, shotCv = null, charCv = null;
   try {
-    shotCv = buildShotCanvas().canvas;
-    // 立绘层：同一套变换再跑一遍，只把视频帧去掉（src=null）。
-    // 没立绘 —— 或贴地模式下人跑到相机后面、project 返回 null —— 就没有这一层，
-    // 也就不出这个文件：宁可不给，也不给一张全透明的空图。
-    if (chCanvas && currentPlacement()) charCv = buildCharCanvas().canvas;
+    await prepareExportChar(plan);                 // 三件套里的立绘层也要高清，否则叠不回照片
+    withExportScale(plan.scale, () => {
+      R = frameRect();                       // 输出空间里的裁切框（scene.json 要用它）
+      const r = composeShot(v);
+      shotCv = r.canvas;
+      LAST_SHOT_LIGHT = r.light;             // 立绘层要跟照片配**同一套**光
+      // 立绘层：同一套变换再跑一遍，只把视频帧去掉（src=null）。
+      // 没立绘 —— 或贴地模式下人跑到相机后面、project 返回 null —— 就没有这一层，
+      // 也就不出这个文件：宁可不给，也不给一张全透明的空图。
+      if (chCanvas && currentPlacement()) charCv = buildCharCanvas().canvas;
+    });
   } catch (e){ saveNote(t('note.shotFail'), null); return; }
+  finally { releaseExportChar(); }
+  if (!shotCv || !R){ saveNote(t('note.shotFail'), null); return; }
   const scene = buildScene(R, currentPlacement());
+  scene.output = { width: shotCv.width, height: shotCv.height, scale: +plan.scale.toFixed(3) };
   // 记录：这一枪按下时的全量状态。安卓壳里才有 ArcLog，浏览器里是空操作。
   arcLog('shot', arcSnapshot());
 
@@ -3896,6 +4355,35 @@ function zoomFail(el, note){
 }
 
 // ── 启动 ──────────────────────────────────────────────────────────
+function fitScenePhoto(){
+  if(!scenePhoto)return;
+  const scale=Math.min(1,2560/Math.max(scenePhoto.naturalWidth,scenePhoto.naturalHeight));
+  const w=Math.max(1,Math.round(scenePhoto.naturalWidth*scale)),h=Math.max(1,Math.round(scenePhoto.naturalHeight*scale));
+  const photo=$('scenePhotoCanvas');photo.width=w;photo.height=h;cv.width=w;cv.height=h;
+  photo.getContext('2d').drawImage(scenePhoto,0,0,w,h);
+  const cover=Math.max(innerWidth/w,innerHeight/h);
+  for(const element of [photo,cv]){element.style.width=w*cover+'px';element.style.height=h*cover+'px';}
+  reframeCrop();                                // 画布尺寸变了 → 裁切按同一份画幅比例重算
+  S.ready=true;resnap();draw();syncOutRow();    // "输出多大"也要重算
+}
+async function loadScenePhoto(file){
+  const local=typeof file!=='string',url=local?URL.createObjectURL(file):file;
+  try {
+    const image=new Image();image.src=url;await image.decode();scenePhoto=image;
+    for(const track of (v.srcObject?.getTracks() || []))track.stop();v.srcObject=null;
+    $('scenePhotoCanvas').hidden=false;v.style.visibility='hidden';$('gate').style.display='none';
+    $('photoPitchRow').hidden=false;$('photoRollRow').hidden=false;
+    S.pitch=+$('photoPitch').value;S.roll=+$('photoRoll').value;fitScenePhoto();
+  } finally {if(local)URL.revokeObjectURL(url);}
+}
+$('pickScenePhoto').onclick=$('gatePhoto').onclick=()=>$('scenePhotoFile').click();
+$('scenePhotoFile').onchange=async e=>{
+  const file=e.target.files?.[0];e.target.value='';if(!file)return;
+  try {await loadScenePhoto(file);}catch(error){saveNote(t('photo.fail',error.message),null);}
+};
+$('returnCamera').onclick=()=>start();
+for(const [id,key] of [['photoPitch','pitch'],['photoRoll','roll']])$(id).oninput=e=>{S[key]=+e.target.value;$(id+'Value').textContent=e.target.value+'°';draw();};
+addEventListener('resize',fitScenePhoto);
 async function start() {
   $('gateMsg').textContent = t('gate.opening');
   try {
@@ -3911,6 +4399,9 @@ async function start() {
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
       audio: false,
     });
+    for(const track of (v.srcObject?.getTracks() || []))track.stop();
+    scenePhoto=null;$('scenePhotoCanvas').hidden=true;v.style.visibility='';
+    $('photoPitchRow').hidden=true;$('photoRollRow').hidden=true;
     v.srcObject = stream;
     await v.play();
 
@@ -3921,6 +4412,7 @@ async function start() {
 
     // 让 canvas 精确覆盖在 video 上，且内部坐标系 = 视频像素坐标
     const fit = () => {
+      if(scenePhoto)return;
       const w = v.videoWidth, h = v.videoHeight;
       if (!w) return;
       // cover：铺满整屏，多出来的两边裁掉。用 min 就是 letterbox，
@@ -3935,10 +4427,13 @@ async function start() {
         el.style.width = (w*sc)+'px'; el.style.height = (h*sc)+'px';
       }
       cv.width = w; cv.height = h;
-      S.ready = true; resnap(); draw();      // 画布尺寸变了，贴边按新框重算
+      reframeCrop();                                     // 画布尺寸变了 → 裁切按画幅比例重算
+      S.ready = true; resnap(); draw(); syncOutRow();     // 贴边与输出尺寸也都要重算
       // 选择器是骑在常驻条 + 把手上面算出来的，转屏/键盘弹出把它顶掉了就重摆一次
       if (!$('kind').hidden) showKind();
     };
+    if(cameraFitHandler){v.removeEventListener('loadedmetadata',cameraFitHandler);removeEventListener('resize',cameraFitHandler);}
+    cameraFitHandler=fit;
     v.addEventListener('loadedmetadata', fit);
     addEventListener('resize', fit);
     if (v.videoWidth) fit();
@@ -3984,6 +4479,7 @@ if (screen.orientation && screen.orientation.addEventListener) {
  */
 function resumeCam(){
   if (document.hidden || !S.ready) return;
+  if(scenePhoto){draw();return;}
   // 已经停了的才 play（play 一个正在播的元素是无害的 no-op，但没必要）
   if (v.paused) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
   draw();                       // 顺手补一帧，别停在分享面板弹出前那一张上
@@ -4045,11 +4541,16 @@ for (const el of document.querySelectorAll('input[type=range]')) rotSafeRange(el
  * 画幅按钮是 JS 生成的，得重画一遍；HUD 是每帧拼的，再画一帧就跟着变了。
  */
 function applyLang(){
+  syncWorkspaceLabels();
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
   document.title = t('app.title');
   document.querySelectorAll('[data-t]').forEach(el => { el.textContent = t(el.dataset.t); });
   document.querySelectorAll('[data-t-title]').forEach(el => { el.title = t(el.dataset.tTitle); });
   document.querySelectorAll('[data-t-ph]').forEach(el => { el.placeholder = t(el.dataset.tPh); });
+  const motionButton=$('t3dMotion');
+  if(motionButton && M3D && M3D.motionName)motionButton.textContent=t(M3D.motionPlaying?'motion.pause':'motion.resume');
+  const nativeOnly=$('segModel').querySelector('[value="birefnet"]');
+  if(nativeOnly.disabled)nativeOnly.textContent=t('seg.nativeOnly');
   const lb = $('lang');
   lb.textContent = LANG === 'en' ? '中' : 'EN';    // 按钮显示的是「切过去会变成什么」
   lb.title = t('lang.switch');
@@ -4070,8 +4571,75 @@ $('lang').onclick = () => {
   applyLang();
 };
 
+function selectWorkspace(key){
+  document.querySelectorAll('[data-workspace]').forEach(panel=>{panel.hidden=panel.dataset.workspace!==key;});
+  document.querySelectorAll('[data-workspace-tab]').forEach(button=>{
+    const active=button.dataset.workspaceTab===key;
+    button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
+  });
+  $('sheet').scrollTop=0;
+}
+function syncWorkspaceLabels(){
+  const labels={assets:['素材','Assets'],place:['摆位','Position'],fusion:['融合','Blend'],frame:['取景','Frame']};
+  document.querySelectorAll('[data-workspace-tab]').forEach(button=>{button.textContent=labels[button.dataset.workspaceTab][LANG==='en'?1:0];});
+}
+function setupWorkspace(){
+  const toast=document.createElement('div');toast.id='actionToast';toast.hidden=true;toast.setAttribute('role','status');toast.setAttribute('aria-live','polite');document.body.appendChild(toast);
+  const inner=$('sheetIn'), original=Array.from(inner.children), panels={};
+  const nav=document.createElement('nav');nav.id='workspaceTabs';nav.setAttribute('role','tablist');nav.setAttribute('aria-label','编辑工作区');
+  for(const key of ['assets','place','fusion','frame']){
+    const panel=document.createElement('div');panel.className='workspacePanel';panel.dataset.workspace=key;panel.id='workspace-'+key;panel.setAttribute('role','tabpanel');
+    panels[key]=panel;inner.appendChild(panel);
+    const button=document.createElement('button');button.type='button';button.dataset.workspaceTab=key;button.setAttribute('role','tab');button.setAttribute('aria-controls',panel.id);button.onclick=()=>selectWorkspace(key);nav.appendChild(button);
+  }
+  let active='assets';
+  for(const element of original){
+    if(element.dataset.t==='sec.place')active='place';
+    if(element.dataset.t==='sec.frame')active='frame';
+    panels[active].appendChild(element);
+  }
+  panels.fusion.innerHTML='<div class="sec" data-t="fusion.title">场景融合</div><div class="hint" data-t="fusion.hint">按环境光调整角色，再微调边缘和阴影。半身立绘不添加脚底阴影。</div>';
+  const row=document.createElement('div');row.className='btns';panels.fusion.appendChild(row);
+  for(const id of ['tLight','tGrain','tShd'])row.appendChild($(id));
+  // 「柔化边缘」按钮已移除：对应的实现会产生黑边（见 bakeLit 上方注释），
+  // 留一个点了会让画面变坏的开关，比没有这个开关更糟。
+  const blend=document.createElement('div');blend.className='row';blend.innerHTML='<label for="blendMix" data-t="fusion.strength">2D 融合强度</label><input id="blendMix" type="range" min="0" max="100" value="100"><output id="blendMixValue">100%</output>';
+  panels.fusion.appendChild(blend);$('blendMix').oninput=e=>{LIGHT_MIX=+e.target.value/100;$('blendMixValue').textContent=e.target.value+'%';litSig='';draw();};
+  const detail=document.createElement('div');detail.id='sourceDetail';detail.className='hint';detail.setAttribute('aria-live','polite');panels.fusion.appendChild(detail);
+  const shadow=document.createElement('div');shadow.className='row';shadow.innerHTML='<label for="shadowGain" data-t="fusion.shadow">脚底阴影强度</label><input id="shadowGain" type="range" min="0" max="150" value="100"><output id="shadowGainValue">100%</output>';
+  panels.fusion.appendChild(shadow);$('shadowGain').oninput=e=>{SHADOW_GAIN=+e.target.value/100;$('shadowGainValue').textContent=e.target.value+'%';draw();};
+  for(const id of ['az3dRow','el3dRow','focus3dRow','dof3dRow'])if($(id))panels.fusion.appendChild($(id));
+  nav.addEventListener('keydown',event=>{
+    if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+    event.preventDefault();const tabs=[...nav.querySelectorAll('[data-workspace-tab]')];
+    const current=tabs.findIndex(tab=>tab.getAttribute('aria-selected')==='true');
+    const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(current+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+    selectWorkspace(tabs[next].dataset.workspaceTab);tabs[next].focus();
+  });
+  $('sheet').prepend(nav);syncWorkspaceLabels();selectWorkspace('assets');
+  rotSafeRange($('blendMix'));rotSafeRange($('shadowGain'));
+  if(!window.ArcNative) {
+    const option=$('segModel').querySelector('[value="birefnet"]');option.disabled=true;option.textContent=t('seg.nativeOnly');
+  }
+}
+setupWorkspace();
 applyLang();
 syncLive();          // 面板里的 bind() 早就把 S 填好了，让常驻条照着它先摆一次
+// Re-sample illumination while the camera is running, even when the phone is held still.
+const liveLightTimer=setInterval(()=>{
+  if(!document.hidden && S.ready && !motion3dRaf)draw();
+},120);
+let resumeMotionAfterHidden=false;
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden) {
+    resumeMotionAfterHidden=!!(M3D && M3D.motionPlaying);
+    if(resumeMotionAfterHidden)M3D.pauseMotion(true);
+    stopMotion3dLoop();
+  } else if(resumeMotionAfterHidden && use3D) {
+    M3D.pauseMotion(false);startMotion3dLoop();resumeMotionAfterHidden=false;
+  }
+});
+addEventListener('beforeunload',()=>{clearInterval(liveLightTimer);stopMotion3dLoop();});
 </script>
 </body>
 </html>
